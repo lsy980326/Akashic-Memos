@@ -1,0 +1,51 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+.venv/
+env/
+.env/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+
+# Sensitive files - 절대 git에 올리면 안되는 파일들!
+# client_secret.json은 반드시 포함해야 합니다.
+# token.json은 각 사용자의 개인 인증 정보이므로 절대 올리면 안됩니다.
+# config.ini는 사용자의 개인 설정을 담고 있으므로 제외합니다.
+# cache.json은 자동 생성되는 캐시 파일이므로 제외합니다.
+core/token.json
+core/config.ini
+core/cache.json
+/token.json
+/config.ini
+/cache.json
+/AkashicMemo/token.json
+/AkashicMemo/config.ini
+/AkashicMemo/cache.json
+C:/Users/*/AppData/Roaming/AkashicMemo/token.json
+C:/Users/*/AppData/Roaming/AkashicMemo/config.ini
+C:/Users/*/AppData/Roaming/AkashicMemo/cache.json
+
+client_secret.json
+
+# PyInstaller spec file - 이건 보통 포함하지만, 제외하고 싶다면 주석을 해제하세요.
+# *.spec
+
+# Operating System files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log

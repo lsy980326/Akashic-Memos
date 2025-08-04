@@ -1,0 +1,99 @@
+/* style.qss (트렌디 미니멀리즘 버전) */
+
+* {
+    border: none;
+    outline: 0;
+}
+
+QWidget {
+    font-family: "Segoe UI", "Malgun Gothic", sans-serif;
+    font-size: 10pt;
+    background-color: #f8f9fa; /* 부드러운 흰색 배경 */
+    color: #212529; /* 거의 검은색에 가까운 텍스트 */
+}
+
+/* === 입력 위젯 === */
+QLineEdit, QTextEdit, QTextBrowser {
+    background-color: #ffffff;
+    border: 1px solid #dee2e6; /* 옅은 회색 테두리 */
+    border-radius: 4px;
+    padding: 8px; /* 충분한 내부 여백 */
+    selection-background-color: #3498DB; /* 부드러운 파란색 */
+    selection-color: white;
+}
+QLineEdit:focus, QTextEdit:focus {
+    border: 1px solid #3498DB; /* 포커스 시 포인트 색상 */
+}
+
+/* === 버튼 === */
+QPushButton {
+    background-color: #3498DB;
+    color: white;
+    font-weight: bold;
+    padding: 8px 16px;
+    border-radius: 4px;
+}
+QPushButton:hover {
+    background-color: #2980b9;
+}
+QPushButton:pressed {
+    background-color: #2471a3;
+}
+/* 페이징 버튼은 아이콘만 보이도록 */
+QPushButton#PagingButton {
+    background-color: transparent;
+    padding: 4px;
+    border-radius: 4px;
+}
+QPushButton#PagingButton:hover {
+    background-color: #e9ecef;
+}
+
+/* === 테이블 === */
+QTableWidget {
+    background-color: #ffffff;
+    border: 1px solid #dee2e6;
+    gridline-color: transparent; /* 수직선 제거 */
+}
+QHeaderView::section {
+    background-color: #f8f9fa;
+    padding: 8px;
+    border: none;
+    border-bottom: 1px solid #dee2e6; /* 헤더 아래에만 선 */
+    font-weight: 600; /* 조금 더 굵게 */
+    color: #495057;
+}
+QTableWidget::item {
+    padding-left: 8px;
+    border-bottom: 1px solid #f1f3f5; /* 행 사이에만 옅은 선 */
+}
+QTableWidget::item:selected {
+    background-color: #dbeafe;
+    color: #212529;
+}
+
+/* === 기타 === */
+QStatusBar {
+    color: #6c757d;
+}
+QSplitter::handle {
+    background-color: #dee2e6;
+}
+QSplitter::handle:horizontal {
+    width: 1px;
+}
+QCheckBox {
+    spacing: 5px;
+}
+QMenu {
+    background-color: #ffffff;
+    border: 1px solid #ced4da;
+    padding: 5px;
+}
+QMenu::item {
+    padding: 5px 20px;
+    border-radius: 4px;
+}
+QMenu::item:selected {
+    background-color: #e9ecef;
+}
