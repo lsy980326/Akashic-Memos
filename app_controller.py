@@ -31,10 +31,12 @@ class AppController:
         self.local_cache = []; self.current_page_token = None; self.next_page_token = None; self.prev_page_tokens = []
         self.search_timer = QTimer(); self.search_timer.setSingleShot(True); self.search_timer.timeout.connect(self.perform_search)
         self.icon = None
+        self.current_viewing_doc_id = None
+        self.current_editing_doc_id = None
         self.connect_signals_and_slots()
         self.setup_hotkeys()
         self.setup_tray_icon()
-        self.sync_cache_from_google()
+        # self.sync_cache_from_google()
 
     def connect_signals_and_slots(self):
         self.emitter.show_new_memo.connect(self.show_new_memo_window)
@@ -50,6 +52,7 @@ class AppController:
         self.search_timer.timeout.connect(self.perform_search)
         self.memo_list.search_bar.textChanged.connect(self.on_search_text_changed)
         self.memo_list.full_text_search_check.stateChanged.connect(self.search_mode_changed)
+        self.memo_list.refresh_button.clicked.connect(self.sync_cache_from_google)
         self.memo_list.table.itemDoubleClicked.connect(self.view_memo_from_item)
         self.memo_list.table.customContextMenuRequested.connect(self.show_context_menu)
         self.memo_list.prev_button.clicked.connect(self.go_to_prev_page)
@@ -99,18 +102,33 @@ class AppController:
     def show_new_memo_window(self): self.memo_editor.clear_fields(); self.memo_editor.show(); self.memo_editor.activateWindow()
 
     def show_memo_list_window(self):
-        self.memo_list.show(); self.memo_list.activateWindow(); self.memo_list.raise_()
-        is_full_text = self.memo_list.full_text_search_check.isChecked()
-        self.memo_list.search_bar.setPlaceholderText("본문 내용으로 검색..." if is_full_text else "제목으로 실시간 필터링..."); self.load_cache_and_sync()
+        self.memo_list.show();
+        self.memo_list.activateWindow();
+        self.memo_list.raise_()
 
-    def load_cache_and_sync(self):
+        is_full_text = self.memo_list.full_text_search_check.isChecked()
+        self.memo_list.search_bar.setPlaceholderText("본문 내용으로 검색..." if is_full_text else "제목으로 실시간 필터링..."); 
+        self.load_cache_only()
+
+    # def load_cache_and_sync(self):
+    #     try:
+    #         if os.path.exists(config_manager.CACHE_FILE):
+    #             with open(config_manager.CACHE_FILE, 'r', encoding='utf-8') as f: self.local_cache = json.load(f)
+    #             self.emitter.list_data_loaded.emit(self.local_cache, True)
+    #     except: self.local_cache = []
+    #     self.emitter.status_update.emit("최신 정보 동기화 중...", 2000)
+    #     threading.Thread(target=self.sync_cache_from_google, daemon=True).start()
+
+    def load_cache_only(self):
         try:
             if os.path.exists(config_manager.CACHE_FILE):
-                with open(config_manager.CACHE_FILE, 'r', encoding='utf-8') as f: self.local_cache = json.load(f)
+                with open(config_manager.CACHE_FILE, 'r', encoding='utf-8') as f:
+                    self.local_cache = json.load(f)
+                # is_local 플래그를 True로 주어 로컬 데이터임을 명시
                 self.emitter.list_data_loaded.emit(self.local_cache, True)
-        except: self.local_cache = []
-        self.emitter.status_update.emit("최신 정보 동기화 중...", 2000)
-        threading.Thread(target=self.sync_cache_from_google, daemon=True).start()
+        except Exception as e:
+            print(f"캐시 로딩 실패: {e}")
+            self.local_cache = []
 
     def sync_cache_from_google(self):
         new_data = google_api_handler.load_memo_list()
@@ -158,21 +176,67 @@ class AppController:
     def save_memo_thread(self, title, content):
         self.emitter.status_update.emit(f"'{title}' 저장 중...", 0)
         success = google_api_handler.save_memo(title, content)
-        if success: self.emitter.notification.emit("저장 완료", f"'{title}' 메모가 저장되었습니다."); self.sync_cache_from_google()
-        else: self.emitter.status_update.emit("저장 실패", 5000)
+        if success:
+            self.emitter.notification.emit("저장 완료", f"'{title}' 메모가 저장되었습니다.")
+            self.sync_cache_from_google(force=True) 
+        else:
+            self.emitter.status_update.emit("저장 실패", 5000)
 
     def update_memo_thread(self, doc_id, title, content):
         self.emitter.status_update.emit(f"'{title}' 업데이트 중...", 0)
         success = google_api_handler.update_memo(doc_id, title, content)
-        if success: self.emitter.status_update.emit("업데이트 완료", 5000); self.sync_cache_from_google()
-        else: self.emitter.status_update.emit("업데이트 실패", 5000)
+        if success:
+            cache_path = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.txt")
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                f.write(f"{title}\n{content}")
+            self.emitter.status_update.emit("업데이트 완료", 5000)
+            self.sync_cache_from_google()
+        else:
+            self.emitter.status_update.emit("업데이트 실패", 5000)
 
     def view_memo_from_item(self, item):
         doc_id = item.data(Qt.UserRole)
         self.view_memo_by_id(doc_id)
 
     def view_memo_by_id(self, doc_id):
-        threading.Thread(target=self.load_and_show_rich_content, args=(doc_id,)).start()
+        self.current_viewing_doc_id = doc_id
+        cache_path = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.html")
+        title = "불러오는 중..."
+        
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    cached_html_full = f.read()
+                # HTML에서 제목과 본문을 분리 (더 안정적인 방식)
+                title = cached_html_full.split('<title>')[1].split('</title>')[0]
+                body = cached_html_full.split('<body>')[1].split('</body>')[0]
+                self.rich_viewer.set_content(title, body)
+            except Exception as e:
+                self.rich_viewer.set_content("오류", "캐시 파일을 읽을 수 없습니다.")
+        else:
+            self.rich_viewer.set_content(title, "<body><p>콘텐츠를 불러오는 중입니다...</p></body>")
+
+        threading.Thread(target=self.sync_rich_content, args=(doc_id,)).start()
+
+    def sync_rich_content(self, doc_id):
+        cache_path = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.html")
+        title, new_html_body = google_api_handler.load_doc_content(doc_id, as_html=True, body_only=True) # body만 가져오는 옵션 추가 필요
+        
+        current_html_full = ""
+        if os.path.exists(cache_path):
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                current_html_full = f.read()
+        
+        new_html_full = f"<html><head><title>{title}</title></head><body>{new_html_body}</body></html>"
+
+        if new_html_full != current_html_full:
+            print(f"'{title}'의 콘텐츠 캐시를 업데이트합니다.")
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                f.write(new_html_full)
+            
+            
+            if self.rich_viewer.isVisible() and self.current_viewing_doc_id == doc_id:
+                self.emitter.show_rich_view.emit(title, new_html_body)
     
     def load_and_show_rich_content(self, doc_id):
         self.emitter.status_update.emit("내용 불러오는 중...", 0)
@@ -180,7 +244,48 @@ class AppController:
         self.emitter.show_rich_view.emit(title, html)
 
     def edit_memo(self, doc_id):
-        threading.Thread(target=self.load_for_edit_thread, args=(doc_id,)).start()
+        self.current_editing_doc_id = doc_id
+        cache_path = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.txt")
+        title = "불러오는 중..."
+        
+        # 1. 로컬 캐시가 있으면 즉시 보여줌
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    # 캐시 파일 첫 줄은 제목, 나머지는 내용
+                    lines = f.readlines()
+                    title = lines[0].strip()
+                    content = "".join(lines[1:])
+                self.memo_editor.open_document(doc_id, title, content)
+            except Exception as e:
+                print(f"텍스트 캐시 읽기 오류: {e}")
+                self.memo_editor.open_document(doc_id, "오류", "캐시 파일을 읽을 수 없습니다.")
+        else:
+            self.memo_editor.open_document(doc_id, title, "콘텐츠를 불러오는 중입니다...")
+        
+        # 2. 백그라운드에서 최신 버전 동기화
+        threading.Thread(target=self.sync_plain_text_content, args=(doc_id,)).start()
+
+    def sync_plain_text_content(self, doc_id):
+        cache_path = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.txt")
+        title, new_content = google_api_handler.load_doc_content(doc_id, as_html=False)
+        
+        # 제목과 내용을 합쳐서 비교
+        new_cache_data = f"{title}\n{new_content}"
+        
+        current_cache_data = ""
+        if os.path.exists(cache_path):
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                current_cache_data = f.read()
+                
+        if new_cache_data != current_cache_data:
+            print(f"'{title}'의 텍스트 캐시를 업데이트합니다.")
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                f.write(new_cache_data)
+            # 현재 편집 중인 창이 이 문서일 경우에만 새로고침 (주의: 사용자 입력 덮어쓸 수 있음)
+            # 여기서는 새로고침 대신 상태바 메시지만 표시
+            if self.memo_editor.isVisible() and self.memo_editor.current_doc_id == doc_id:
+                self.emitter.status_update.emit("백그라운드에서 최신 버전이 동기화되었습니다.", 5000)
         
     def load_for_edit_thread(self, doc_id):
         self.emitter.status_update.emit("편집할 내용 불러오는 중...", 0)
@@ -194,8 +299,11 @@ class AppController:
     def delete_memo_thread(self, doc_id):
         self.emitter.status_update.emit("삭제 중...", 0)
         success = google_api_handler.delete_memo(doc_id)
-        if success: self.emitter.status_update.emit("삭제 완료", 5000); self.sync_cache_from_google()
-        else: self.emitter.status_update.emit("삭제 실패", 5000)
+        if success:
+            self.emitter.status_update.emit("삭제 완료", 5000)
+            self.sync_cache_from_google()
+        else:
+            self.emitter.status_update.emit("삭제 실패", 5000)
 
     def show_context_menu(self, pos):
         item = self.memo_list.table.itemAt(pos)

@@ -5,11 +5,17 @@ import sys
 
 APP_NAME = "AkashicMemo"
 APP_DATA_DIR = os.path.join(os.getenv('APPDATA'), APP_NAME)
+
+CONTENT_CACHE_DIR = os.path.join(APP_DATA_DIR, 'content_cache')
+
+# 해당 폴더들이 없으면 새로 생성
 if not os.path.exists(APP_DATA_DIR):
     os.makedirs(APP_DATA_DIR)
+if not os.path.exists(CONTENT_CACHE_DIR):
+    os.makedirs(CONTENT_CACHE_DIR)
 
 CONFIG_FILE = os.path.join(APP_DATA_DIR, 'config.ini')
-CACHE_FILE = os.path.join(APP_DATA_DIR, 'cache.json')
+CACHE_FILE = os.path.join(APP_DATA_DIR, 'cache.json') # 목록 캐시
 config = configparser.ConfigParser()
 
 def load_config():

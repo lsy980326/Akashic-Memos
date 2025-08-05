@@ -74,8 +74,23 @@ class MemoListWindow(QWidget):
     def __init__(self):
         super().__init__(); self.initUI()
     def initUI(self):
-        self.setWindowTitle('메모 목록'); self.setGeometry(200, 200, 500, 400); main_layout = QVBoxLayout(); main_layout.setContentsMargins(10, 10, 10, 10); main_layout.setSpacing(10)
-        search_layout = QHBoxLayout(); self.search_bar = QLineEdit(); self.full_text_search_check = QCheckBox("본문 포함"); search_layout.addWidget(self.search_bar); search_layout.addWidget(self.full_text_search_check); main_layout.addLayout(search_layout)
+        self.setWindowTitle('메모 목록');
+        self.setGeometry(200, 200, 500, 400);
+        main_layout = QVBoxLayout();
+        main_layout.setContentsMargins(10, 10, 10, 10);
+        main_layout.setSpacing(10)
+
+        search_layout = QHBoxLayout();
+        self.search_bar = QLineEdit();
+        self.full_text_search_check = QCheckBox("본문 포함");
+        self.refresh_button = QPushButton(qta.icon('fa5s.sync-alt', color='#495057'), "")
+        self.refresh_button.setObjectName("PagingButton")
+
+        search_layout.addWidget(self.search_bar);
+        search_layout.addWidget(self.full_text_search_check);
+        search_layout.addWidget(self.refresh_button)
+        main_layout.addLayout(search_layout)
+
         self.table = QTableWidget(); self.table.setColumnCount(2); self.table.setHorizontalHeaderLabels(['제목', '생성일']); self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch); self.table.setEditTriggers(QTableWidget.NoEditTriggers); self.table.setSortingEnabled(True); main_layout.addWidget(self.table)
         paging_layout = QHBoxLayout(); self.prev_button = QPushButton(qta.icon('fa5s.chevron-left', color='#495057'), ""); self.prev_button.setObjectName("PagingButton"); self.page_label = QLabel("1 페이지"); self.page_label.setAlignment(Qt.AlignCenter); self.next_button = QPushButton(qta.icon('fa5s.chevron-right', color='#495057'), ""); self.next_button.setObjectName("PagingButton"); paging_layout.addWidget(self.prev_button); paging_layout.addWidget(self.page_label); paging_layout.addWidget(self.next_button); main_layout.addLayout(paging_layout)
         self.statusBar = QStatusBar(); main_layout.addWidget(self.statusBar); self.setLayout(main_layout)
