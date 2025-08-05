@@ -18,7 +18,7 @@ class SignalEmitter(QObject):
     show_list_memo = pyqtSignal()
     show_settings = pyqtSignal()
     show_quick_launcher = pyqtSignal()
-    show_edit_memo = pyqtSignal(str, str, str)
+    show_edit_memo = pyqtSignal(str, str, str, str)
     show_rich_view = pyqtSignal(str, str)
     list_data_loaded = pyqtSignal(list, bool)
     status_update = pyqtSignal(str, int)
@@ -31,12 +31,15 @@ class AppController:
         self.local_cache = []; self.current_page_token = None; self.next_page_token = None; self.prev_page_tokens = []
         self.search_timer = QTimer(); self.search_timer.setSingleShot(True); self.search_timer.timeout.connect(self.perform_search)
         self.icon = None
+        self.launcher_mode = 'memos'
         self.current_viewing_doc_id = None
         self.current_editing_doc_id = None
         self.connect_signals_and_slots()
         self.setup_hotkeys()
         self.setup_tray_icon()
-        # self.sync_cache_from_google()
+        self.all_tags = set()
+        self.load_cache_only(initial_load=True)
+        QTimer.singleShot(1000, self.sync_cache_from_google)
 
     def connect_signals_and_slots(self):
         self.emitter.show_new_memo.connect(self.show_new_memo_window)
@@ -57,6 +60,7 @@ class AppController:
         self.memo_list.table.customContextMenuRequested.connect(self.show_context_menu)
         self.memo_list.prev_button.clicked.connect(self.go_to_prev_page)
         self.memo_list.next_button.clicked.connect(self.go_to_next_page)
+        self.memo_list.navigation_selected.connect(self.on_navigation_selected)
         
         self.memo_editor.save_button.clicked.connect(self.save_memo)
         self.memo_editor.preview_timer.timeout.connect(self.update_editor_preview)
@@ -66,7 +70,8 @@ class AppController:
         self.settings.startup_checkbox.stateChanged.connect(config_manager.set_startup)
 
         self.quick_launcher.search_box.textChanged.connect(self.search_for_launcher)
-        self.quick_launcher.memo_selected.connect(self.view_memo_by_id)
+        # self.quick_launcher.memo_selected.connect(self.view_memo_by_id)
+        self.quick_launcher.memo_selected.connect(self.on_launcher_item_selected)
 
     def setup_hotkeys(self):
         try:
@@ -92,53 +97,121 @@ class AppController:
     def toggle_quick_launcher(self):
         if self.quick_launcher.isVisible(): self.quick_launcher.hide()
         else:
-            screen_geometry = QApplication.primaryScreen().geometry(); x = (screen_geometry.width() - self.quick_launcher.width()) // 2; y = (screen_geometry.height() - self.quick_launcher.height()) // 4
-            self.quick_launcher.move(x, y); self.quick_launcher.show(); self.quick_launcher.activateWindow(); self.quick_launcher.search_box.setFocus(); self.quick_launcher.search_box.selectAll(); self.search_for_launcher("")
+            self.launcher_mode = 'memos'
+            self.quick_launcher.search_box.setPlaceholderText("메모 검색...")
+
+            screen_geometry = QApplication.primaryScreen().geometry()
+            x = (screen_geometry.width() - self.quick_launcher.width()) // 2
+            y = (screen_geometry.height() - self.quick_launcher.height()) // 4
+            self.quick_launcher.move(x, y)
+            self.quick_launcher.show()
+            self.quick_launcher.activateWindow()
+            self.quick_launcher.search_box.setFocus()
+            self.quick_launcher.search_box.clear() # clear()가 textChanged를 호출하여 목록을 채움
 
     def search_for_launcher(self, query):
-        if query: filtered = [row for row in self.local_cache if query.lower() in row[0].lower()]; self.quick_launcher.update_results(filtered[:10])
-        else: self.quick_launcher.update_results(self.local_cache[:10])
+        # --- 태그 검색 모드 ---
+        if query.startswith('#'):
+            self.launcher_mode = 'tags'
+            self.quick_launcher.search_box.setPlaceholderText("태그 검색...")
+            
+            # 입력된 텍스트(# 제외)를 포함하는 태그만 필터링
+            tag_query = query[1:].lower()
+            filtered_tags = sorted([tag for tag in self.all_tags if tag_query in tag.lower()])
+            
+            # QListWidget에 표시하기 위해 형식 변환
+            # (제목, 날짜, 문서ID) 형식에서 (태그, "태그", 태그) 형식으로
+            results = [(f"#{tag}", "태그", tag) for tag in filtered_tags]
+            self.quick_launcher.update_results(results)
+
+        # --- 메모 검색 모드 ---
+        else:
+            self.launcher_mode = 'memos'
+            self.quick_launcher.search_box.setPlaceholderText("메모 검색...")
+            
+            if query:
+                filtered = [row[:3] for row in self.local_cache if query.lower() in row[0].lower()]
+                self.quick_launcher.update_results(filtered[:10])
+            else:
+                results = [row[:3] for row in self.local_cache]
+                self.quick_launcher.update_results(results[:10])
 
     def show_new_memo_window(self): self.memo_editor.clear_fields(); self.memo_editor.show(); self.memo_editor.activateWindow()
 
     def show_memo_list_window(self):
-        self.memo_list.show();
-        self.memo_list.activateWindow();
+        self.memo_list.show()
+        self.memo_list.activateWindow()
         self.memo_list.raise_()
-
         is_full_text = self.memo_list.full_text_search_check.isChecked()
-        self.memo_list.search_bar.setPlaceholderText("본문 내용으로 검색..." if is_full_text else "제목으로 실시간 필터링..."); 
-        self.load_cache_only()
+        self.memo_list.search_bar.setPlaceholderText("본문 내용으로 검색..." if is_full_text else "제목으로 실시간 필터링...")
+        
+        self.emitter.list_data_loaded.emit(self.local_cache, True)
+        self.memo_list.update_nav_tree(self.all_tags)
+        self.memo_list.nav_tree.setCurrentItem(self.memo_list.nav_tree.topLevelItem(0))
 
-    # def load_cache_and_sync(self):
-    #     try:
-    #         if os.path.exists(config_manager.CACHE_FILE):
-    #             with open(config_manager.CACHE_FILE, 'r', encoding='utf-8') as f: self.local_cache = json.load(f)
-    #             self.emitter.list_data_loaded.emit(self.local_cache, True)
-    #     except: self.local_cache = []
-    #     self.emitter.status_update.emit("최신 정보 동기화 중...", 2000)
-    #     threading.Thread(target=self.sync_cache_from_google, daemon=True).start()
 
-    def load_cache_only(self):
+    def load_cache_only(self, initial_load=False):
         try:
             if os.path.exists(config_manager.CACHE_FILE):
                 with open(config_manager.CACHE_FILE, 'r', encoding='utf-8') as f:
                     self.local_cache = json.load(f)
-                # is_local 플래그를 True로 주어 로컬 데이터임을 명시
-                self.emitter.list_data_loaded.emit(self.local_cache, True)
+                
+                self.update_tags_from_cache()
+
+                # 프로그램 최초 실행 시에만 UI를 업데이트합니다.
+                if initial_load:
+                    self.emitter.list_data_loaded.emit(self.local_cache, True)
+                    self.memo_list.update_nav_tree(self.all_tags)
         except Exception as e:
             print(f"캐시 로딩 실패: {e}")
             self.local_cache = []
 
     def sync_cache_from_google(self):
+        self.emitter.status_update.emit("최신 정보 동기화 중...", 2000)
+        threading.Thread(target=self.sync_cache_thread, daemon=True).start()
+
+    def sync_cache_thread(self):
         new_data = google_api_handler.load_memo_list()
         if new_data is not None and new_data != self.local_cache:
             self.local_cache = new_data
+            self.update_tags_from_cache() # 태그도 새로고침
             try:
-                with open(config_manager.CACHE_FILE, 'w', encoding='utf-8') as f: json.dump(self.local_cache, f, ensure_ascii=False, indent=4)
+                with open(config_manager.CACHE_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(self.local_cache, f, ensure_ascii=False, indent=4)
             except IOError: pass
-            if not self.memo_list.full_text_search_check.isChecked(): self.emitter.list_data_loaded.emit(self.local_cache, True)
+            
+            # 현재 열려 있는 창의 내용을 업데이트
+            if self.memo_list.isVisible():
+                if not self.memo_list.full_text_search_check.isChecked():
+                    self.emitter.list_data_loaded.emit(self.local_cache, True)
+                self.memo_list.update_nav_tree(self.all_tags)
+            
             self.emitter.status_update.emit("동기화 완료. 최신 목록입니다.", 5000)
+
+    def update_tags_from_cache(self):
+        self.all_tags.clear()
+        for row in self.local_cache:
+            if len(row) > 3 and row[3]:
+                tags = [t.strip().lstrip('#') for t in row[3].replace(',', ' ').split() if t.strip().startswith('#')]
+                self.all_tags.update(tags)
+
+    def on_navigation_selected(self, selected_item_text):
+        if selected_item_text == "태그":
+            return
+            
+        self.memo_list.search_bar.clear()
+        self.memo_list.full_text_search_check.setChecked(False)
+
+        if selected_item_text == "전체 메모":
+            self.emitter.list_data_loaded.emit(self.local_cache, True)
+        else:
+            # 태그 클릭 시
+            filtered_data = [
+                row for row in self.local_cache
+                if len(row) > 3 and selected_item_text in row[3]
+            ]
+            self.emitter.list_data_loaded.emit(filtered_data, True)
+
 
     def on_search_text_changed(self):
         if self.memo_list.full_text_search_check.isChecked(): self.search_timer.start(600)
@@ -167,24 +240,26 @@ class AppController:
     def go_to_next_page(self): self.perform_search(page_token=self.next_page_token)
 
     def save_memo(self):
-        editor = self.memo_editor; title = editor.title_input.text(); content = editor.editor.toPlainText(); doc_id = editor.current_doc_id
+        editor = self.memo_editor; title = editor.title_input.text(); content = editor.editor.toPlainText(); doc_id = editor.current_doc_id; tags = editor.tag_input.text()
         if not (title and content): return
-        if doc_id: threading.Thread(target=self.update_memo_thread, args=(doc_id, title, content)).start()
-        else: threading.Thread(target=self.save_memo_thread, args=(title, content)).start()
+        if doc_id:
+            threading.Thread(target=self.update_memo_thread, args=(doc_id, title, content, tags)).start()
+        else:
+            threading.Thread(target=self.save_memo_thread, args=(title, content, tags)).start()
         editor.close()
 
-    def save_memo_thread(self, title, content):
+    def save_memo_thread(self, title, content,tags):
         self.emitter.status_update.emit(f"'{title}' 저장 중...", 0)
-        success = google_api_handler.save_memo(title, content)
+        success = google_api_handler.save_memo(title, content,tags)
         if success:
             self.emitter.notification.emit("저장 완료", f"'{title}' 메모가 저장되었습니다.")
-            self.sync_cache_from_google(force=True) 
+            self.sync_cache_from_google() 
         else:
             self.emitter.status_update.emit("저장 실패", 5000)
 
-    def update_memo_thread(self, doc_id, title, content):
+    def update_memo_thread(self, doc_id, title, content,tags):
         self.emitter.status_update.emit(f"'{title}' 업데이트 중...", 0)
-        success = google_api_handler.update_memo(doc_id, title, content)
+        success = google_api_handler.update_memo(doc_id, title, content,tags)
         if success:
             cache_path = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.txt")
             with open(cache_path, 'w', encoding='utf-8') as f:
@@ -292,27 +367,7 @@ class AppController:
         self.emitter.show_rich_view.emit(title, html)
 
     def edit_memo(self, doc_id):
-        self.current_editing_doc_id = doc_id
-        cache_path = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.txt")
-        title = "불러오는 중..."
-        
-        # 1. 로컬 캐시가 있으면 즉시 보여줌
-        if os.path.exists(cache_path):
-            try:
-                with open(cache_path, 'r', encoding='utf-8') as f:
-                    # 캐시 파일 첫 줄은 제목, 나머지는 내용
-                    lines = f.readlines()
-                    title = lines[0].strip()
-                    content = "".join(lines[1:])
-                self.memo_editor.open_document(doc_id, title, content)
-            except Exception as e:
-                print(f"텍스트 캐시 읽기 오류: {e}")
-                self.memo_editor.open_document(doc_id, "오류", "캐시 파일을 읽을 수 없습니다.")
-        else:
-            self.memo_editor.open_document(doc_id, title, "콘텐츠를 불러오는 중입니다...")
-        
-        # 2. 백그라운드에서 최신 버전 동기화
-        threading.Thread(target=self.sync_plain_text_content, args=(doc_id,)).start()
+        threading.Thread(target=self.load_for_edit_thread, args=(doc_id,)).start()
 
     def sync_plain_text_content(self, doc_id):
         cache_path = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.txt")
@@ -337,9 +392,9 @@ class AppController:
         
     def load_for_edit_thread(self, doc_id):
         self.emitter.status_update.emit("편집할 내용 불러오는 중...", 0)
-        title, markdown_content = google_api_handler.load_doc_content(doc_id, as_html=False)
-        self.emitter.show_edit_memo.emit(doc_id, title, markdown_content)
-        
+        title, markdown_content, tags_text = google_api_handler.load_doc_content(doc_id, as_html=False)
+        self.emitter.show_edit_memo.emit(doc_id, title, markdown_content, tags_text)
+
     def delete_memo(self, doc_id):
         reply = QMessageBox.question(self.memo_list, '삭제 확인', f"메모를 정말로 삭제하시겠습니까?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes: threading.Thread(target=self.delete_memo_thread, args=(doc_id,)).start()
@@ -383,3 +438,28 @@ class AppController:
 
         # 2. 완전한 HTML을 뷰어에 설정
         self.memo_editor.viewer.setHtml(final_html_with_css)
+
+    def on_launcher_item_selected(self, selected_data):
+        if self.launcher_mode == 'tags':
+            # 태그 검색 모드에서 태그를 선택한 경우
+            tag_name = selected_data
+            # 해당 태그를 가진 메모 목록으로 결과창을 업데이트
+            self.show_memos_for_tag_in_launcher(tag_name)
+        else:
+            # 메모 검색 모드에서 메모를 선택한 경우 (기존 동작)
+            doc_id = selected_data
+            self.view_memo_by_id(doc_id)
+            self.quick_launcher.hide()
+
+    def show_memos_for_tag_in_launcher(self, tag_name):
+        self.launcher_mode = 'memos' # 다시 메모 검색 모드로 전환
+        self.quick_launcher.search_box.setPlaceholderText("메모 검색...")
+        
+        # 검색창의 텍스트를 비워서 사용자가 다시 입력할 수 있게 함
+        self.quick_launcher.search_box.clear()
+        
+        filtered_memos = [
+            row[:3] for row in self.local_cache
+            if len(row) > 3 and tag_name in row[3]
+        ]
+        self.quick_launcher.update_results(filtered_memos)

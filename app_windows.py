@@ -1,7 +1,7 @@
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QLineEdit, QHBoxLayout,
                              QTextEdit, QPushButton, QTableWidget, QTableWidgetItem,
-                             QHeaderView, QMessageBox, QMenu, QStatusBar, QLabel,
+                             QHeaderView, QMessageBox, QMenu, QStatusBar, QLabel, QFrame,QTreeWidget,QTreeWidgetItem,
                              QFormLayout, QCheckBox, QTextBrowser, QSplitter, QListWidget, QListWidgetItem, QFileDialog)
 from core import config_manager
 import qtawesome as qta
@@ -29,7 +29,8 @@ class QuickLauncherWindow(QWidget):
             self.results_list.addItem(item)
         if self.results_list.count() > 0: self.results_list.setCurrentRow(0)
     def item_activated(self, item):
-        doc_id = item.data(Qt.UserRole); self.memo_selected.emit(doc_id); self.hide()
+        data = item.data(Qt.UserRole);
+        self.memo_selected.emit(data);
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape: self.hide()
         elif event.key() == Qt.Key_Down: self.results_list.setCurrentRow(min(self.results_list.currentRow() + 1, self.results_list.count() - 1))
@@ -52,49 +53,130 @@ class MarkdownEditorWindow(QWidget):
     def __init__(self):
         super().__init__(); self.current_doc_id = None; self.initUI(); self.preview_timer = QTimer(self); self.preview_timer.setSingleShot(True)
     def initUI(self):
-        self.setWindowTitle('새 메모 작성'); self.setGeometry(150, 150, 1200, 800)
-        main_layout = QVBoxLayout(); main_layout.setContentsMargins(10, 10, 10, 10); main_layout.setSpacing(10)
-        top_layout = QHBoxLayout(); self.title_input = QLineEdit(); self.title_input.setPlaceholderText('제목')
-        self.save_button = QPushButton(' 저장'); self.save_button.setIcon(qta.icon('fa5s.save', color='white'))
-        top_layout.addWidget(self.title_input); top_layout.addWidget(self.save_button)
+        self.setWindowTitle('새 메모 작성')
+        self.setGeometry(150, 150, 1200, 800)
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(10)
+        
+        top_layout = QHBoxLayout()
+        self.title_input = QLineEdit()
+        self.title_input.setPlaceholderText('제목')
+        self.save_button = QPushButton(' 저장')
+        self.save_button.setIcon(qta.icon('fa5s.save', color='white'))
+        top_layout.addWidget(self.title_input)
+        top_layout.addWidget(self.save_button)
         main_layout.addLayout(top_layout)
-        splitter = QSplitter(Qt.Horizontal); self.editor = QTextEdit(); self.viewer = QTextBrowser()
-        self.editor.setPlaceholderText("# 마크다운으로 메모를 작성하세요..."); self.viewer.setOpenExternalLinks(True)
-        self.editor.setStyleSheet("font-family: Consolas, 'Courier New', monospace;");
-        splitter.addWidget(self.editor); splitter.addWidget(self.viewer); splitter.setSizes([600, 600])
-        main_layout.addWidget(splitter); self.setLayout(main_layout)
-    def open_document(self, doc_id, title, markdown_content):
-        self.current_doc_id = doc_id; self.setWindowTitle(f'메모 편집: {title}'); self.title_input.setText(title); self.editor.setPlainText(markdown_content); self.show(); self.activateWindow()
+
+        splitter = QSplitter(Qt.Horizontal)
+        self.editor = QTextEdit()
+        self.viewer = QTextBrowser()
+        self.editor.setPlaceholderText("# 마크다운으로 메모를 작성하세요...")
+        self.viewer.setOpenExternalLinks(True)
+        self.editor.setStyleSheet("font-family: Consolas, 'Courier New', monospace;")
+        splitter.addWidget(self.editor)
+        splitter.addWidget(self.viewer)
+        splitter.setSizes([600, 600])
+        main_layout.addWidget(splitter)
+        
+        # ★★★ 핵심 수정: 불필요한 QFrame을 제거하고 QHBoxLayout을 직접 사용합니다. ★★★
+        tag_layout = QHBoxLayout()
+        tag_layout.setContentsMargins(0, 5, 0, 0) # 위쪽 여백만 살짝 줍니다.
+        tag_label = QLabel("태그:")
+        self.tag_input = QLineEdit()
+        self.tag_input.setPlaceholderText("#태그1, #태그2, ...")
+        tag_layout.addWidget(tag_label)
+        tag_layout.addWidget(self.tag_input)
+        
+        # 메인 레이아웃에 태그 레이아웃을 추가
+        main_layout.addLayout(tag_layout)
+        self.setLayout(main_layout)
+        self.setLayout(main_layout)
+
+    def open_document(self, doc_id, title, markdown_content,tags_text):
+        self.current_doc_id = doc_id
+        self.setWindowTitle(f'메모 편집: {title}')
+        self.title_input.setText(title)
+        self.editor.setPlainText(markdown_content)
+        self.tag_input.setText(tags_text) # 태그 입력창에 내용 설정
+        self.show()
+        self.activateWindow()
+
     def clear_fields(self):
-        self.current_doc_id = None; self.setWindowTitle('새 메모 작성'); self.title_input.clear(); self.editor.clear(); self.viewer.clear()
+        self.current_doc_id = None; self.setWindowTitle('새 메모 작성'); self.title_input.clear(); self.editor.clear(); self.viewer.clear();  self.tag_input.clear()
     def closeEvent(self, event): self.clear_fields(); self.hide(); event.ignore()
 
 class MemoListWindow(QWidget):
+    navigation_selected = pyqtSignal(str) 
     context_menu_requested = pyqtSignal(object)
     def __init__(self):
         super().__init__(); self.initUI()
     def initUI(self):
-        self.setWindowTitle('메모 목록');
-        self.setGeometry(200, 200, 500, 400);
-        main_layout = QVBoxLayout();
-        main_layout.setContentsMargins(10, 10, 10, 10);
-        main_layout.setSpacing(10)
+        self.setWindowTitle('메모 목록')
+        self.setGeometry(200, 200, 800, 500) # 창 크기 확장
+        main_layout = QHBoxLayout(self) # ★★★ 메인 레이아웃을 QHBoxLayout으로 변경
 
-        search_layout = QHBoxLayout();
-        self.search_bar = QLineEdit();
-        self.full_text_search_check = QCheckBox("본문 포함");
-        self.refresh_button = QPushButton(qta.icon('fa5s.sync-alt', color='#495057'), "")
-        self.refresh_button.setObjectName("PagingButton")
+        # --- 좌측 네비게이션 영역 ---
+        left_panel = QFrame()
+        left_layout = QVBoxLayout(left_panel)
+        left_panel.setMaximumWidth(200)
 
-        search_layout.addWidget(self.search_bar);
-        search_layout.addWidget(self.full_text_search_check);
+        self.nav_tree = QTreeWidget()
+        self.nav_tree.setHeaderHidden(True)
+        left_layout.addWidget(self.nav_tree)
+        
+        # --- 우측 메인 콘텐츠 영역 (기존 창의 내용) ---
+        right_panel = QFrame()
+        right_layout = QVBoxLayout(right_panel)
+
+        search_layout = QHBoxLayout(); self.search_bar = QLineEdit(); self.full_text_search_check = QCheckBox("본문 포함"); search_layout.addWidget(self.search_bar); search_layout.addWidget(self.full_text_search_check);
+        self.refresh_button = QPushButton(qta.icon('fa5s.sync-alt', color='#495057'), ""); self.refresh_button.setObjectName("PagingButton");
         search_layout.addWidget(self.refresh_button)
-        main_layout.addLayout(search_layout)
+        right_layout.addLayout(search_layout)
 
-        self.table = QTableWidget(); self.table.setColumnCount(2); self.table.setHorizontalHeaderLabels(['제목', '생성일']); self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch); self.table.setEditTriggers(QTableWidget.NoEditTriggers); self.table.setSortingEnabled(True); main_layout.addWidget(self.table)
-        paging_layout = QHBoxLayout(); self.prev_button = QPushButton(qta.icon('fa5s.chevron-left', color='#495057'), ""); self.prev_button.setObjectName("PagingButton"); self.page_label = QLabel("1 페이지"); self.page_label.setAlignment(Qt.AlignCenter); self.next_button = QPushButton(qta.icon('fa5s.chevron-right', color='#495057'), ""); self.next_button.setObjectName("PagingButton"); paging_layout.addWidget(self.prev_button); paging_layout.addWidget(self.page_label); paging_layout.addWidget(self.next_button); main_layout.addLayout(paging_layout)
-        self.statusBar = QStatusBar(); main_layout.addWidget(self.statusBar); self.setLayout(main_layout)
-        self.table.setContextMenuPolicy(Qt.CustomContextMenu); self.table.customContextMenuRequested.connect(self.context_menu_requested.emit)
+        self.table = QTableWidget(); self.table.setColumnCount(2); self.table.setHorizontalHeaderLabels(['제목', '생성일']); self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch); self.table.setEditTriggers(QTableWidget.NoEditTriggers); self.table.setSortingEnabled(True);
+        right_layout.addWidget(self.table)
+        
+        paging_layout = QHBoxLayout(); self.prev_button = QPushButton(qta.icon('fa5s.chevron-left', color='#495057'), ""); self.prev_button.setObjectName("PagingButton"); self.page_label = QLabel("1 페이지"); self.page_label.setAlignment(Qt.AlignCenter); self.next_button = QPushButton(qta.icon('fa5s.chevron-right', color='#495057'), ""); self.next_button.setObjectName("PagingButton"); paging_layout.addWidget(self.prev_button); paging_layout.addWidget(self.page_label); paging_layout.addWidget(self.next_button);
+        right_layout.addLayout(paging_layout)
+        
+        self.statusBar = QStatusBar();
+        right_layout.addWidget(self.statusBar)
+
+        # --- 스플리터로 좌/우 패널 결합 ---
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(left_panel)
+        splitter.addWidget(right_panel)
+        splitter.setSizes([180, 620])
+        main_layout.addWidget(splitter)
+        
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.context_menu_requested.emit)
+        self.nav_tree.currentItemChanged.connect(self.on_nav_selected)
+
+    def on_nav_selected(self, current, previous):
+        if current:
+            self.navigation_selected.emit(current.text(0))
+
+    def update_nav_tree(self, tags):
+        self.nav_tree.clear()
+        
+        all_memos_item = QTreeWidgetItem(self.nav_tree)
+        all_memos_item.setText(0, "전체 메모")
+        all_memos_item.setIcon(0, qta.icon('fa5s.inbox'))
+        
+        if tags:
+            tags_root_item = QTreeWidgetItem(self.nav_tree)
+            tags_root_item.setText(0, "태그")
+            tags_root_item.setIcon(0, qta.icon('fa5s.tags'))
+            
+            for tag in sorted(tags):
+                tag_item = QTreeWidgetItem(tags_root_item)
+                tag_item.setText(0, tag)
+            
+            tags_root_item.setExpanded(True)
+        
+        self.nav_tree.setCurrentItem(all_memos_item)
     def populate_table(self, data, is_local):
         is_full_text = self.full_text_search_check.isChecked()
         self.prev_button.setVisible(is_full_text)

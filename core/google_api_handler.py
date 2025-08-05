@@ -14,7 +14,7 @@ def get_services():
     drive_service = build('drive', 'v3', credentials=creds)
     return docs_service, sheets_service, drive_service
 
-def save_memo(title, markdown_content):
+def save_memo(title, markdown_content, tags_text):
     docs_service, sheets_service, drive_service = get_services()
     SPREADSHEET_ID = config_manager.get_setting('Google', 'spreadsheet_id')
     MEMO_FOLDER_ID = config_manager.get_setting('Google', 'folder_id')
@@ -34,7 +34,7 @@ def save_memo(title, markdown_content):
         docs_service.documents().batchUpdate(documentId=doc_id, body={'requests': requests_body}).execute()
         
         now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        row_data = [title, now, doc_id]
+        row_data = [title, now, doc_id, tags_text]
         sheets_service.spreadsheets().values().append(
             spreadsheetId=SPREADSHEET_ID, range='A1', valueInputOption='USER_ENTERED',
             insertDataOption='INSERT_ROWS', body={'values': [row_data]}).execute()
@@ -43,7 +43,7 @@ def save_memo(title, markdown_content):
         print(f"메모 저장 중 오류 발생: {e}")
         return False
 
-def update_memo(doc_id, new_title, markdown_content):
+def update_memo(doc_id, new_title, markdown_content, tags_text):
     docs_service, sheets_service, drive_service = get_services()
     SPREADSHEET_ID = config_manager.get_setting('Google', 'spreadsheet_id')
     try:
@@ -60,14 +60,18 @@ def update_memo(doc_id, new_title, markdown_content):
         
         drive_service.files().update(fileId=doc_id, body={'name': new_title}).execute()
 
-        result = sheets_service.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range='C:C').execute()
+        result = sheets_service.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range='C:D').execute()
         values = result.get('values', []); row_number = -1
         for i, row in enumerate(values):
             if row and row[0] == doc_id: row_number = i + 1; break
         if row_number != -1:
+            # 제목(A열)과 태그(D열)를 동시에 업데이트
             sheets_service.spreadsheets().values().update(
                 spreadsheetId=SPREADSHEET_ID, range=f'A{row_number}',
                 valueInputOption='USER_ENTERED', body={'values': [[new_title]]}).execute()
+            sheets_service.spreadsheets().values().update(
+                spreadsheetId=SPREADSHEET_ID, range=f'D{row_number}',
+                valueInputOption='USER_ENTERED', body={'values': [[tags_text]]}).execute()
         return True
     except Exception as e:
         print(f"메모 업데이트 중 오류 발생: {e}")
@@ -94,8 +98,18 @@ def load_doc_content(doc_id, as_html=True, body_only=False):
         
         plain_text = "".join(plain_text_parts)
 
+        _, sheets_service, _ = get_services()
+        SPREADSHEET_ID = config_manager.get_setting('Google', 'spreadsheet_id')
+        result = sheets_service.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range='C:D').execute()
+        values = result.get('values', [])
+        tags_text = ""
+        for row in values:
+            if row and row[0] == doc_id and len(row) > 1:
+                tags_text = row[1]
+                break
+
         if not as_html:
-            return title, plain_text.strip()
+            return title, plain_text.strip(), tags_text 
             
         # --- HTML 변환 로직 ---
         html_body = markdown.markdown(plain_text, extensions=['fenced_code', 'codehilite', 'tables', 'nl2br', 'sane_lists'])
@@ -112,10 +126,18 @@ def load_memo_list():
     SPREADSHEET_ID = config_manager.get_setting('Google', 'spreadsheet_id')
     try:
         result = sheets_service.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID, range='A2:C').execute()
+            spreadsheetId=SPREADSHEET_ID, range='A2:D').execute()
         values = result.get('values', [])
-        print(f"로컬 캐시용 전체 목록 로딩 성공! {len(values)}개 항목.")
-        return values
+        
+        # 행 데이터가 부족할 경우 빈 문자열로 채워줌 (안정성)
+        processed_values = []
+        for row in values:
+            while len(row) < 4:
+                row.append("")
+            processed_values.append(row)
+
+        print(f"로컬 캐시용 전체 목록 로딩 성공! {len(processed_values)}개 항목.")
+        return processed_values
     except Exception as e:
         print(f"전체 목록 로딩 중 오류 발생: {e}")
         return []
