@@ -194,6 +194,44 @@ class AppController:
         else:
             self.emitter.status_update.emit("업데이트 실패", 5000)
 
+    def _get_final_html(self, title, html_body):
+        DEFAULT_CSS = """
+        <style>
+            body { font-family: "Segoe UI", "Malgun Gothic", sans-serif; line-height: 1.7; padding: 35px; background-color: #ffffff; color: #333333; }
+            h1, h2, h3, h4, h5, h6 { font-weight: 600; color: #111111; margin-top: 1.5em; margin-bottom: 0.5em; line-height: 1.25; }
+            h1 { font-size: 2em; border-bottom: 1px solid #eaecef; padding-bottom: 0.3em; }
+            h2 { font-size: 1.5em; border-bottom: 1px solid #eaecef; padding-bottom: 0.3em; }
+            p { margin: 0 0 16px 0; }
+            a { color: #0366d6; text-decoration: none; } a:hover { text-decoration: underline; }
+            pre { background-color: #f6f8fa; border-radius: 4px; padding: 16px; overflow: auto; font-size: 85%; }
+            code { font-family: "D2Coding", "Consolas", monospace; background-color: rgba(27,31,35,0.05); border-radius: 3px; padding: .2em .4em; font-size: 90%; }
+            pre > code { padding: 0; background-color: transparent; }
+            blockquote { margin: 0 0 16px 0; padding: 0 1.2em; color: #6a737d; border-left: 0.25em solid #dfe2e5; }
+            ul, ol { padding-left: 2em; margin-bottom: 16px; }
+            table { border-collapse: collapse; margin-bottom: 16px; display: block; width: 100%; overflow: auto; }
+            th, td { border: 1px solid #dfe2e5; padding: 8px 13px; }
+            tr { border-top: 1px solid #c6cbd1; background-color: #fff; }
+            tr:nth-child(2n) { background-color: #f6f8fa; }
+            hr { height: .25em; padding: 0; margin: 24px 0; background-color: #e1e4e8; border: 0; }
+        </style>
+        """
+        
+        final_css = DEFAULT_CSS
+        custom_css_path = config_manager.get_setting('Display', 'custom_css_path')
+        if custom_css_path and os.path.exists(custom_css_path):
+            try:
+                try:
+                    with open(custom_css_path, 'r', encoding='utf-8') as f:
+                        final_css = f"<style>{f.read()}</style>"
+                except UnicodeDecodeError:
+                    with open(custom_css_path, 'r', encoding='cp949') as f:
+                        final_css = f"<style>{f.read()}</style>"
+                print(f"사용자 CSS 적용: {custom_css_path}")
+            except Exception as e:
+                print(f"사용자 CSS 파일 읽기 오류: {e}")
+        
+        return f'<html><head><meta charset="UTF-8"><title>{title}</title>{final_css}</head><body>{html_body}</body></html>'
+    
     def view_memo_from_item(self, item):
         doc_id = item.data(Qt.UserRole)
         self.view_memo_by_id(doc_id)
@@ -201,42 +239,52 @@ class AppController:
     def view_memo_by_id(self, doc_id):
         self.current_viewing_doc_id = doc_id
         cache_path = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.html")
-        title = "불러오는 중..."
         
         if os.path.exists(cache_path):
             try:
                 with open(cache_path, 'r', encoding='utf-8') as f:
                     cached_html_full = f.read()
-                # HTML에서 제목과 본문을 분리 (더 안정적인 방식)
+                # HTML 전체를 그대로 전달
                 title = cached_html_full.split('<title>')[1].split('</title>')[0]
-                body = cached_html_full.split('<body>')[1].split('</body>')[0]
-                self.rich_viewer.set_content(title, body)
+                self.emitter.show_rich_view.emit(title, cached_html_full)
             except Exception as e:
-                self.rich_viewer.set_content("오류", "캐시 파일을 읽을 수 없습니다.")
+                print(f"HTML 캐시 읽기 오류: {e}")
+                self.emitter.show_rich_view.emit("오류", "캐시 파일을 읽을 수 없습니다.")
         else:
-            self.rich_viewer.set_content(title, "<body><p>콘텐츠를 불러오는 중입니다...</p></body>")
+            self.emitter.show_rich_view.emit("불러오는 중...", "<body><p>콘텐츠를 불러오는 중입니다...</p></body>")
 
         threading.Thread(target=self.sync_rich_content, args=(doc_id,)).start()
 
     def sync_rich_content(self, doc_id):
         cache_path = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.html")
-        title, new_html_body = google_api_handler.load_doc_content(doc_id, as_html=True, body_only=True) # body만 가져오는 옵션 추가 필요
         
+        # 1. CSS 없는 순수 HTML 본문을 가져옴
+        title, new_html_body = google_api_handler.load_doc_content(doc_id, as_html=True)
+        
+        if "내용을 불러올 수 없습니다" in new_html_body: # 로드 실패 시 중단
+            return
+
+        # 2. 컨트롤러에서 CSS를 조합하여 완전한 HTML 생성
+        new_html_full = self._get_final_html(title, new_html_body)
+
         current_html_full = ""
         if os.path.exists(cache_path):
-            with open(cache_path, 'r', encoding='utf-8') as f:
-                current_html_full = f.read()
-        
-        new_html_full = f"<html><head><title>{title}</title></head><body>{new_html_body}</body></html>"
+            try:
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    current_html_full = f.read()
+            except: pass
 
         if new_html_full != current_html_full:
             print(f"'{title}'의 콘텐츠 캐시를 업데이트합니다.")
-            with open(cache_path, 'w', encoding='utf-8') as f:
-                f.write(new_html_full)
-            
+            try:
+                with open(cache_path, 'w', encoding='utf-8') as f:
+                    f.write(new_html_full)
+            except Exception as e:
+                print(f"콘텐츠 캐시 저장 오류: {e}")
             
             if self.rich_viewer.isVisible() and self.current_viewing_doc_id == doc_id:
-                self.emitter.show_rich_view.emit(title, new_html_body)
+                # 3. 뷰어에도 완전한 HTML 전달
+                self.emitter.show_rich_view.emit(title, new_html_full)
     
     def load_and_show_rich_content(self, doc_id):
         self.emitter.status_update.emit("내용 불러오는 중...", 0)
@@ -319,7 +367,7 @@ class AppController:
 
     def save_settings(self):
         s = self.settings
-        config_manager.save_settings(s.hotkey_new_edit.text(), s.hotkey_list_edit.text(), s.hotkey_launcher_edit.text(), s.sheet_id_edit.text(), s.folder_id_edit.text(), s.page_size_edit.text())
+        config_manager.save_settings(s.hotkey_new_edit.text(), s.hotkey_list_edit.text(), s.hotkey_launcher_edit.text(), s.sheet_id_edit.text(), s.folder_id_edit.text(), s.page_size_edit.text(),s.css_path_edit.text())
         QMessageBox.information(s, "저장 완료", "설정이 저장되었습니다.\n프로그램을 다시 시작해야 적용됩니다.")
 
     def show_notification(self, title, message):
@@ -327,5 +375,11 @@ class AppController:
     
     def update_editor_preview(self):
         markdown_text = self.memo_editor.editor.toPlainText()
-        html = markdown.markdown(markdown_text, extensions=['fenced_code', 'codehilite', 'tables', 'nl2br'])
-        self.memo_editor.viewer.setHtml(html)
+        
+        # 1. 마크다운을 순수 HTML 본문으로 변환
+        html_body = markdown.markdown(markdown_text, extensions=['fenced_code', 'codehilite', 'tables', 'nl2br'])
+        # _get_final_html 함수는 제목이 필요하지만, 여기서는 제목이 없으므로 임시 제목을 사용
+        final_html_with_css = self._get_final_html("미리보기", html_body)
+
+        # 2. 완전한 HTML을 뷰어에 설정
+        self.memo_editor.viewer.setHtml(final_html_with_css)

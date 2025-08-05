@@ -2,7 +2,7 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QLineEdit, QHBoxLayout,
                              QTextEdit, QPushButton, QTableWidget, QTableWidgetItem,
                              QHeaderView, QMessageBox, QMenu, QStatusBar, QLabel,
-                             QFormLayout, QCheckBox, QTextBrowser, QSplitter, QListWidget, QListWidgetItem)
+                             QFormLayout, QCheckBox, QTextBrowser, QSplitter, QListWidget, QListWidgetItem, QFileDialog)
 from core import config_manager
 import qtawesome as qta
 
@@ -120,18 +120,64 @@ class MemoListWindow(QWidget):
 
 class SettingsWindow(QWidget):
     def __init__(self):
-        super().__init__(); self.initUI(); self.load_current_settings()
+        super().__init__()
+        self.initUI()
+        self.load_current_settings()
     def initUI(self):
-        self.setWindowTitle('설정'); self.setGeometry(400, 400, 450, 280); form_layout = QFormLayout()
-        self.hotkey_new_edit = QLineEdit(); self.hotkey_list_edit = QLineEdit(); self.hotkey_launcher_edit = QLineEdit()
-        self.sheet_id_edit = QLineEdit(); self.folder_id_edit = QLineEdit(); self.page_size_edit = QLineEdit()
-        form_layout.addRow(QLabel("새 메모 단축키:"), self.hotkey_new_edit); form_layout.addRow(QLabel("목록 보기 단축키:"), self.hotkey_list_edit); form_layout.addRow(QLabel("빠른 실행 단축키:"), self.hotkey_launcher_edit)
-        form_layout.addRow(QLabel("Google Sheet ID:"), self.sheet_id_edit); form_layout.addRow(QLabel("Google Drive Folder ID:"), self.folder_id_edit); form_layout.addRow(QLabel("페이지 당 항목 수:"), self.page_size_edit)
-        self.startup_checkbox = QCheckBox("윈도우 시작 시 자동 실행");
-        self.save_button = QPushButton("설정 저장");
-        main_layout = QVBoxLayout(); main_layout.addLayout(form_layout); main_layout.addWidget(self.startup_checkbox); main_layout.addWidget(self.save_button); self.setLayout(main_layout)
+        self.setWindowTitle('설정')
+        self.setGeometry(400, 400, 500, 310) # 창 크기 조정
+        form_layout = QFormLayout()
+        form_layout.setSpacing(10)
+
+        self.hotkey_new_edit = QLineEdit()
+        self.hotkey_list_edit = QLineEdit()
+        self.hotkey_launcher_edit = QLineEdit()
+        self.sheet_id_edit = QLineEdit()
+        self.folder_id_edit = QLineEdit()
+        self.page_size_edit = QLineEdit()
+        
+        form_layout.addRow(QLabel("새 메모 단축키:"), self.hotkey_new_edit)
+        form_layout.addRow(QLabel("목록 보기 단축키:"), self.hotkey_list_edit)
+        form_layout.addRow(QLabel("빠른 실행 단축키:"), self.hotkey_launcher_edit)
+        form_layout.addRow(QLabel("Google Sheet ID:"), self.sheet_id_edit)
+        form_layout.addRow(QLabel("Google Drive Folder ID:"), self.folder_id_edit)
+        form_layout.addRow(QLabel("페이지 당 항목 수:"), self.page_size_edit)
+
+        # ★★★ 핵심 수정: 사용자 CSS 경로 지정을 위한 UI 추가 ★★★
+        css_layout = QHBoxLayout()
+        self.css_path_edit = QLineEdit()
+        self.css_path_edit.setPlaceholderText("CSS 파일 경로 (비워두면 기본 스타일 사용)")
+        css_browse_button = QPushButton("찾아보기")
+        css_browse_button.clicked.connect(self.browse_css_file)
+        css_layout.addWidget(self.css_path_edit)
+        css_layout.addWidget(css_browse_button)
+        form_layout.addRow(QLabel("사용자 정의 뷰어 CSS:"), css_layout)
+
+        self.startup_checkbox = QCheckBox("윈도우 시작 시 자동 실행")
+        self.save_button = QPushButton("설정 저장")
+        
+        main_layout = QVBoxLayout()
+        main_layout.addLayout(form_layout)
+        main_layout.addWidget(self.startup_checkbox)
+        main_layout.addWidget(self.save_button)
+        self.setLayout(main_layout)
+
     def load_current_settings(self):
-        self.hotkey_new_edit.setText(config_manager.get_setting('Hotkeys', 'new_memo')); self.hotkey_list_edit.setText(config_manager.get_setting('Hotkeys', 'list_memos')); self.hotkey_launcher_edit.setText(config_manager.get_setting('Hotkeys', 'quick_launcher'))
-        self.sheet_id_edit.setText(config_manager.get_setting('Google', 'spreadsheet_id')); self.folder_id_edit.setText(config_manager.get_setting('Google', 'folder_id')); self.page_size_edit.setText(config_manager.get_setting('Display', 'page_size'))
+        self.hotkey_new_edit.setText(config_manager.get_setting('Hotkeys', 'new_memo'))
+        self.hotkey_list_edit.setText(config_manager.get_setting('Hotkeys', 'list_memos'))
+        self.hotkey_launcher_edit.setText(config_manager.get_setting('Hotkeys', 'quick_launcher'))
+        self.sheet_id_edit.setText(config_manager.get_setting('Google', 'spreadsheet_id'))
+        self.folder_id_edit.setText(config_manager.get_setting('Google', 'folder_id'))
+        self.page_size_edit.setText(config_manager.get_setting('Display', 'page_size'))
+        # ★★★ 핵심 수정: CSS 경로 설정 불러오기 ★★★
+        self.css_path_edit.setText(config_manager.get_setting('Display', 'custom_css_path'))
         self.startup_checkbox.setChecked(config_manager.is_startup_enabled())
-    def closeEvent(self, event): self.hide()
+
+    # ★★★ 핵심 수정: CSS 파일 찾아보기 대화상자를 여는 함수 추가 ★★★
+    def browse_css_file(self):
+        fname, _ = QFileDialog.getOpenFileName(self, '사용자 CSS 파일 선택', '', 'CSS Files (*.css)')
+        if fname:
+            self.css_path_edit.setText(fname)
+
+    def closeEvent(self, event):
+        self.hide()

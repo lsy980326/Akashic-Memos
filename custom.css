@@ -1,0 +1,118 @@
+/* custom_style.css - Obsidian-Like Minimalist Theme */
+
+body {
+  font-family: "Pretendard", "Segoe UI", "Malgun Gothic", sans-serif;
+  line-height: 1.8;
+  padding: 50px;
+  background-color: #ffffff;
+  color: #2e3338;
+  max-width: 750px;
+  margin: 0 auto;
+  font-size: 16px; /* 기본 폰트 크기를 약간 키워 가독성 향상 */
+}
+
+/* --- 타이포그래피 --- */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: "Segoe UI", "Malgun Gothic", sans-serif;
+  font-weight: 700;
+  color: #1a1d1f;
+  margin-top: 2em;
+  margin-bottom: 1em;
+  line-height: 1.3;
+}
+h1 {
+  font-size: 2.5em;
+  border-bottom: 1px solid #eaecee;
+  padding-bottom: 0.4em;
+}
+h2 {
+  font-size: 2em;
+  border-bottom: 1px solid #eaecee;
+  padding-bottom: 0.4em;
+}
+h3 {
+  font-size: 1.6em;
+}
+h4 {
+  font-size: 1.3em;
+  color: #4a5560;
+}
+
+p {
+  margin: 0 0 1.2em 0;
+}
+
+/* --- 링크 --- */
+a {
+  color: #4a89e8;
+  text-decoration: none;
+  font-weight: 600;
+  border-bottom: 1px solid rgba(74, 137, 232, 0.2);
+  transition: background-color 0.2s ease-in-out;
+}
+a:hover {
+  background-color: rgba(74, 137, 232, 0.1);
+}
+
+/* --- 코드 블록 --- */
+pre {
+  background-color: #f7f8f9;
+  border: 1px solid #eaecee;
+  border-radius: 6px;
+  padding: 1.2em;
+  overflow: auto;
+  font-size: 90%;
+  line-height: 1.5;
+}
+code {
+  font-family: "D2Coding", "SFMono-Regular", Consolas, "Liberation Mono", Menlo,
+    monospace;
+  background-color: #eaecee;
+  color: #384047;
+  border-radius: 4px;
+  padding: 0.2em 0.4em;
+  font-size: 90%;
+}
+pre > code {
+  padding: 0;
+  background-color: transparent;
+  border: none;
+}
+
+/* --- 기타 요소 --- */
+blockquote {
+  margin: 0 0 1.5em 0;
+  padding: 0 1.5em;
+  color: #6a737d;
+  border-left: 3px solid #ced4da;
+}
+ul,
+ol {
+  padding-left: 2em;
+  margin-bottom: 1.5em;
+}
+hr {
+  border: 0;
+  border-top: 1px solid #eaecee;
+  margin: 3em 0;
+}
+table {
+  border-collapse: collapse;
+  margin-bottom: 1.5em;
+  width: 100%;
+}
+th,
+td {
+  border: 1px solid #dfe2e5;
+  padding: 10px 15px;
+  text-align: left;
+}
+th {
+  background-color: #f7f8f9;
+  font-weight: 600;
+}

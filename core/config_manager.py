@@ -31,7 +31,7 @@ def load_config():
             'spreadsheet_id': 'YOUR_SPREADSHEET_ID', # 기본값은 비워두거나 예시 ID 사용
             'folder_id': 'YOUR_FOLDER_ID'
         },
-        'Display': {'page_size': '30'}
+        'Display': {'page_size': '30','custom_css_path': ''}
     }
     
     changes_made = False
@@ -49,8 +49,6 @@ def load_config():
             config.write(configfile)
 
 def create_default_config():
-    """기본 설정값으로 config.ini 파일을 생성"""
-    # load_config가 대부분의 일을 하므로 이 함수는 간단하게 유지
     if os.path.exists(CONFIG_FILE):
         os.remove(CONFIG_FILE)
     load_config()
@@ -58,13 +56,14 @@ def create_default_config():
 def get_setting(section, key):
     return config.get(section, key)
 
-def save_settings(hotkey_new, hotkey_list, hotkey_launcher, sheet_id, folder_id, page_size):
+def save_settings(hotkey_new, hotkey_list, hotkey_launcher, sheet_id, folder_id, page_size,custom_css_path):
     config['Hotkeys']['new_memo'] = hotkey_new
     config['Hotkeys']['list_memos'] = hotkey_list
     config['Hotkeys']['quick_launcher'] = hotkey_launcher
     config['Google']['spreadsheet_id'] = sheet_id
     config['Google']['folder_id'] = folder_id
     config['Display']['page_size'] = page_size
+    config['Display']['custom_css_path'] = custom_css_path
     with open(CONFIG_FILE, 'w', encoding='utf-8') as configfile:
         config.write(configfile)
 

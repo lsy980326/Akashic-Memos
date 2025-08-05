@@ -73,87 +73,39 @@ def update_memo(doc_id, new_title, markdown_content):
         print(f"메모 업데이트 중 오류 발생: {e}")
         return False
 
+import markdown
+
+# get_credentials, get_services 함수는 기존과 동일하다고 가정합니다.
+# from your_google_api_setup import get_credentials, get_services
+
 def load_doc_content(doc_id, as_html=True, body_only=False):
-    creds = get_credentials()
     docs_service, _, _ = get_services()
     try:
         doc = docs_service.documents().get(documentId=doc_id).execute()
         title = doc.get('title', '제목 없음')
-        body_content = doc.get('body').get('content')
-
-        # --- 순수 텍스트(마크다운) 추출 로직 ---
+        
         plain_text_parts = []
+        body_content = doc.get('body').get('content')
         for element in body_content:
             if 'paragraph' in element:
-                para_elements = element.get('paragraph').get('elements', [])
-                for pe in para_elements:
+                for pe in element.get('paragraph').get('elements', []):
                     if 'textRun' in pe:
                         plain_text_parts.append(pe.get('textRun').get('content', ''))
         
         plain_text = "".join(plain_text_parts)
 
-        # HTML이 아닌, 순수 텍스트를 원하면 여기서 반환
         if not as_html:
             return title, plain_text.strip()
             
         # --- HTML 변환 로직 ---
-        # 텍스트(마크다운)를 HTML로 변환
-        html_body = markdown.markdown(plain_text, extensions=['fenced_code', 'codehilite', 'tables', 'nl2br'])
-
-        # 뷰어에 적용할 CSS 스타일 (밝은 테마)
-        CSS_STYLE = """
-        <style>
-            body { 
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; 
-                line-height: 1.6; 
-                padding: 20px; 
-            }
-            a { color: #007bff; text-decoration: none; }
-            a:hover { text-decoration: underline; }
-            img { max-width: 100%; height: auto; border-radius: 6px; }
-            pre { 
-                background-color: #f6f8fa; 
-                padding: 16px; 
-                overflow: auto; 
-                font-size: 85%; 
-                line-height: 1.45; 
-                border-radius: 6px; 
-            }
-            code { 
-                font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace; 
-                font-size: inherit; 
-            }
-            table { border-collapse: collapse; margin-bottom: 16px; }
-            th, td { border: 1px solid #dfe2e5; padding: 6px 13px; }
-            tr { border-top: 1px solid #c6cbd1; }
-            tr:nth-child(2n) { background-color: #f6f8fa; }
-            h1, h2, h3, h4, h5, h6 { 
-                border-bottom: 1px solid #eaecef; 
-                padding-bottom: .3em; 
-                margin-top: 24px; 
-                margin-bottom: 16px; 
-                font-weight: 600; 
-                line-height: 1.25;
-            }
-            h1 { font-size: 2em; } h2 { font-size: 1.5em; } h3 { font-size: 1.25em; }
-        </style>
-        """
-
-        if body_only:
-            # HTML의 body 부분만 필요할 경우
-            # Google Docs API는 이미지/서식 정보를 직접 제공하지 않으므로,
-            # 마크다운 기반으로 변환된 HTML body를 반환.
-            return title, html_body
-
-        # 전체 HTML 문서가 필요할 경우
-        final_html = f'<html><head><meta charset="UTF-8">{CSS_STYLE}</head><body>{html_body}</body></html>'
+        html_body = markdown.markdown(plain_text, extensions=['fenced_code', 'codehilite', 'tables', 'nl2br', 'sane_lists'])
         
-        print(f"문서 ID '{doc_id}'를 HTML로 변환 성공!")
-        return title, final_html
+        print(f"문서 ID '{doc_id}'의 HTML 본문 생성 성공!")
+        return title, html_body
 
     except Exception as e:
         print(f"문서 내용 변환 중 오류 발생: {e}")
-        return "오류", "내용을 불러올 수 없습니다."
+        return "오류", "<p>내용을 불러올 수 없습니다.</p>"
 
 def load_memo_list():
     docs_service, sheets_service, drive_service = get_services()
