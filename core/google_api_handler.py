@@ -2,10 +2,8 @@ from googleapiclient.discovery import build
 from core.auth import get_credentials
 from core import config_manager
 import datetime
-import base64
-import requests
 import markdown
-import os # os 모듈 임포트
+import os
 
 def get_services():
     creds = get_credentials()
@@ -83,7 +81,8 @@ import markdown
 # from your_google_api_setup import get_credentials, get_services
 
 def load_doc_content(doc_id, as_html=True, body_only=False):
-    docs_service, _, _ = get_services()
+    docs_service, sheets_service, _ = get_services()
+    SPREADSHEET_ID = config_manager.get_setting('Google', 'spreadsheet_id')
     try:
         doc = docs_service.documents().get(documentId=doc_id).execute()
         title = doc.get('title', '제목 없음')
@@ -95,31 +94,24 @@ def load_doc_content(doc_id, as_html=True, body_only=False):
                 for pe in element.get('paragraph').get('elements', []):
                     if 'textRun' in pe:
                         plain_text_parts.append(pe.get('textRun').get('content', ''))
-        
         plain_text = "".join(plain_text_parts)
 
-        _, sheets_service, _ = get_services()
-        SPREADSHEET_ID = config_manager.get_setting('Google', 'spreadsheet_id')
         result = sheets_service.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range='C:D').execute()
-        values = result.get('values', [])
-        tags_text = ""
+        values = result.get('values', []); tags_text = ""
         for row in values:
             if row and row[0] == doc_id and len(row) > 1:
-                tags_text = row[1]
-                break
+                tags_text = row[1]; break
 
         if not as_html:
-            return title, plain_text.strip(), tags_text 
+            return title, plain_text.strip(), tags_text
             
-        # --- HTML 변환 로직 ---
         html_body = markdown.markdown(plain_text, extensions=['fenced_code', 'codehilite', 'tables', 'nl2br', 'sane_lists'])
-        
-        print(f"문서 ID '{doc_id}'의 HTML 본문 생성 성공!")
-        return title, html_body
+        return title, html_body, tags_text
 
     except Exception as e:
         print(f"문서 내용 변환 중 오류 발생: {e}")
-        return "오류", "<p>내용을 불러올 수 없습니다.</p>"
+        return "오류", "<p>내용을 불러올 수 없습니다.</p>", ""
+
 
 def load_memo_list():
     docs_service, sheets_service, drive_service = get_services()
