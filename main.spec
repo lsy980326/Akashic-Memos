@@ -11,9 +11,10 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[
+        datas=[
         ('resources', 'resources'),
-        ('style.qss', '.')
+        ('style.qss', '.'),
+        ('custom.css', '.')
     ],
     hiddenimports=[
         'pystray._win32',

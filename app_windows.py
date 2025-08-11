@@ -7,6 +7,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QLineEdit, QHBoxLayout,
 from PyQt5.QtGui import QDesktopServices
 from core import config_manager
 import qtawesome as qta
+import os
 
 class LinkHandlingPage(QWebEnginePage):
     linkClicked = pyqtSignal(QUrl)
@@ -47,22 +48,50 @@ class QuickLauncherWindow(QWidget):
         elif event.key() == Qt.Key_Up: self.results_list.setCurrentRow(max(self.results_list.currentRow() - 1, 0))
         else: super().keyPressEvent(event)
 
+class CustomWebEngineView(QWebEngineView):
+    tags_edit_requested = pyqtSignal(str)
+
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+        
+        edit_tags_action = menu.addAction("태그 편집")
+        action = menu.exec_(self.mapToGlobal(event.pos()))
+        
+        if action == edit_tags_action:
+            # 메뉴를 통해 직접 태그 편집을 요청할 수도 있으므로, 선택된 텍스트가 없는 경우를 대비합니다.
+            self.page().runJavaScript("window.getSelection().toString();", self.handle_selection_callback)
+
+    def handle_selection_callback(self, selected_text):
+        # 선택된 텍스트가 있는 경우, 해당 텍스트를 태그로 간주하고 시그널을 보냅니다.
+        if selected_text:
+            self.tags_edit_requested.emit(selected_text)
+        else:
+            # 선택된 텍스트가 없으면, 빈 문자열을 보내 일반적인 태그 편집을 유도합니다.
+            self.tags_edit_requested.emit("")
+
 class RichMemoViewWindow(QWidget):
     link_activated = pyqtSignal(QUrl)
+    tags_edit_requested = pyqtSignal(str)
+
     def __init__(self):
         super().__init__(); self.initUI()
+
     def initUI(self):
         self.setWindowTitle('메모 보기'); self.setGeometry(250, 250, 600, 700); self.setStyleSheet("background-color: #ffffff;")
         layout = QVBoxLayout()
-        self.content_display = QWebEngineView()
+        self.content_display = CustomWebEngineView()
         self.page = LinkHandlingPage(self)
         self.content_display.setPage(self.page)
         self.page.linkClicked.connect(self.link_activated)
+        self.content_display.tags_edit_requested.connect(self.tags_edit_requested.emit)
         layout.addWidget(self.content_display); self.setLayout(layout)
+
     def set_content(self, title, html_content):
         self.setWindowTitle(title)
-        self.content_display.setHtml(html_content, QUrl("file:///"))
+        base_url = QUrl.fromLocalFile(config_manager.APP_DATA_DIR.replace('\\', '/') + '/')
+        self.content_display.setHtml(html_content, base_url)
         self.show(); self.activateWindow(); self.raise_()
+
     def closeEvent(self, event): self.hide()
 
 class MarkdownEditorWindow(QWidget):
@@ -71,9 +100,21 @@ class MarkdownEditorWindow(QWidget):
     def initUI(self):
         self.setWindowTitle('새 메모 작성'); self.setGeometry(150, 150, 1200, 800)
         main_layout = QVBoxLayout(); main_layout.setContentsMargins(10, 10, 10, 10); main_layout.setSpacing(10)
-        top_layout = QHBoxLayout(); self.title_input = QLineEdit(); self.title_input.setPlaceholderText('제목')
-        self.save_button = QPushButton(' 저장'); self.save_button.setIcon(qta.icon('fa5s.save', color='white'))
-        top_layout.addWidget(self.title_input); top_layout.addWidget(self.save_button); main_layout.addLayout(top_layout)
+        top_layout = QHBoxLayout()
+        self.title_input = QLineEdit()
+        self.title_input.setPlaceholderText('제목')
+        
+        self.add_image_button = QPushButton(' 이미지 추가')
+        self.add_image_button.setIcon(qta.icon('fa5s.image', color='white'))
+        self.add_image_button.clicked.connect(self.add_image)
+
+        self.save_button = QPushButton(' 저장')
+        self.save_button.setIcon(qta.icon('fa5s.save', color='white'))
+        
+        top_layout.addWidget(self.title_input)
+        top_layout.addWidget(self.add_image_button)
+        top_layout.addWidget(self.save_button)
+        main_layout.addLayout(top_layout)
         splitter = QSplitter(Qt.Horizontal); self.editor = QTextEdit()
         self.viewer = QWebEngineView()
         self.editor.setPlaceholderText("# 마크다운으로 메모를 작성하세요...");
@@ -88,6 +129,25 @@ class MarkdownEditorWindow(QWidget):
         self.current_doc_id = doc_id; self.setWindowTitle(f'메모 편집: {title}'); self.title_input.setText(title); self.editor.setPlainText(markdown_content); self.tag_input.setText(tags_text); self.show(); self.activateWindow()
     def clear_fields(self):
         self.current_doc_id = None; self.setWindowTitle('새 메모 작성'); self.title_input.clear(); self.editor.clear(); self.viewer.setHtml(""); self.tag_input.clear()
+    
+    def add_image(self):
+        file_name, _ = QFileDialog.getOpenFileName(self, "이미지 선택", "", "Image Files (*.png *.jpg *.bmp *.gif)")
+        if file_name:
+            import os
+            import shutil
+            from core.utils import resource_path
+
+            image_dir = resource_path("resources/images")
+            if not os.path.exists(image_dir):
+                os.makedirs(image_dir)
+            
+            new_file_path = os.path.join(image_dir, os.path.basename(file_name))
+            shutil.copy(file_name, new_file_path)
+            
+            # 마크다운 이미지 태그로 변환하여 에디터에 삽입
+            markdown_image_tag = f"![image](resources/images/{os.path.basename(file_name)})"
+            self.editor.insertPlainText(markdown_image_tag)
+
     def closeEvent(self, event): self.clear_fields(); self.hide(); event.ignore()
 
 class MemoListWindow(QWidget):
@@ -102,7 +162,7 @@ class MemoListWindow(QWidget):
         search_layout = QHBoxLayout(); self.search_bar = QLineEdit(); self.full_text_search_check = QCheckBox("본문 포함"); self.refresh_button = QPushButton(qta.icon('fa5s.sync-alt', color='#495057'), ""); self.refresh_button.setObjectName("PagingButton");
         search_layout.addWidget(self.search_bar); search_layout.addWidget(self.full_text_search_check); search_layout.addWidget(self.refresh_button)
         right_layout.addLayout(search_layout)
-        self.table = QTableWidget(); self.table.setColumnCount(2); self.table.setHorizontalHeaderLabels(['제목', '생성일']); self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch); self.table.setEditTriggers(QTableWidget.NoEditTriggers); self.table.setSortingEnabled(True);
+        self.table = QTableWidget(); self.table.setColumnCount(3); self.table.setHorizontalHeaderLabels(['제목', '날짜', '태그']); self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch); self.table.setEditTriggers(QTableWidget.NoEditTriggers); self.table.setSortingEnabled(True);
         right_layout.addWidget(self.table)
         paging_layout = QHBoxLayout(); self.prev_button = QPushButton(qta.icon('fa5s.chevron-left', color='#495057'), ""); self.prev_button.setObjectName("PagingButton"); self.page_label = QLabel("1 페이지"); self.page_label.setAlignment(Qt.AlignCenter); self.next_button = QPushButton(qta.icon('fa5s.chevron-right', color='#495057'), ""); self.next_button.setObjectName("PagingButton"); paging_layout.addWidget(self.prev_button); paging_layout.addWidget(self.page_label); paging_layout.addWidget(self.next_button);
         right_layout.addLayout(paging_layout)
@@ -112,25 +172,67 @@ class MemoListWindow(QWidget):
         self.nav_tree.currentItemChanged.connect(self.on_nav_selected)
     def on_nav_selected(self, current, previous):
         if current: self.navigation_selected.emit(current.text(0))
-    def update_nav_tree(self, tags):
+    def update_nav_tree(self, all_tags, local_cache):
         self.nav_tree.blockSignals(True)
         self.nav_tree.clear()
-        all_memos_item = QTreeWidgetItem(self.nav_tree); all_memos_item.setText(0, "전체 메모"); all_memos_item.setIcon(0, qta.icon('fa5s.inbox'))
-        if tags:
-            tags_root_item = QTreeWidgetItem(self.nav_tree); tags_root_item.setText(0, "태그"); tags_root_item.setIcon(0, qta.icon('fa5s.tags'))
-            for tag in sorted(tags):
-                tag_item = QTreeWidgetItem(tags_root_item); tag_item.setText(0, tag)
+        
+        # 전체 메모 카운트
+        all_memos_count = len(local_cache)
+        all_memos_item = QTreeWidgetItem(self.nav_tree)
+        all_memos_item.setText(0, f"전체 메모 ({all_memos_count})")
+        all_memos_item.setIcon(0, qta.icon('fa5s.inbox'))
+
+        if all_tags:
+            tags_root_item = QTreeWidgetItem(self.nav_tree)
+            tags_root_item.setText(0, f"태그 ({len(all_tags)})")
+            tags_root_item.setIcon(0, qta.icon('fa5s.tags'))
+            
+            # 각 태그의 문서 수 계산
+            tag_counts = {}
+            for row in local_cache:
+                if len(row) > 3 and row[3]:
+                    tags_in_row = [t.strip().lstrip('#') for t in row[3].replace(',', ' ').split() if t.strip().startswith('#')]
+                    for tag in tags_in_row:
+                        tag_counts[tag] = tag_counts.get(tag, 0) + 1
+
+            for tag in sorted(all_tags):
+                count = tag_counts.get(tag, 0)
+                tag_item = QTreeWidgetItem(tags_root_item)
+                tag_item.setText(0, f"{tag} ({count})")
             tags_root_item.setExpanded(True)
+            
         self.nav_tree.setCurrentItem(all_memos_item)
         self.nav_tree.blockSignals(False)
+
     def populate_table(self, data, is_local):
-        is_api_result = not is_local; self.prev_button.setVisible(is_api_result); self.next_button.setVisible(is_api_result); self.page_label.setVisible(is_api_result); self.table.setSortingEnabled(is_local)
-        self.table.clearContents(); self.table.setRowCount(len(data));
+        is_api_result = not is_local
+        self.prev_button.setVisible(is_api_result)
+        self.next_button.setVisible(is_api_result)
+        self.page_label.setVisible(is_api_result)
+        self.table.setSortingEnabled(is_local)
+        
+        self.table.clearContents()
+        self.table.setRowCount(len(data))
+        
         for i, row in enumerate(data):
-            title, date, doc_id = row[0], row[1], row[2]
-            title_item = QTableWidgetItem(title); date_item = QTableWidgetItem(date)
-            title_item.setData(Qt.UserRole, doc_id); date_item.setData(Qt.UserRole, doc_id)
-            self.table.setItem(i, 0, title_item); self.table.setItem(i, 1, date_item)
+            # 데이터 길이에 따라 안전하게 값 추출
+            title = row[0] if len(row) > 0 else ""
+            date = row[1] if len(row) > 1 else ""
+            doc_id = row[2] if len(row) > 2 else ""
+            tags = row[3] if len(row) > 3 else ""
+
+            title_item = QTableWidgetItem(title)
+            date_item = QTableWidgetItem(date)
+            tags_item = QTableWidgetItem(tags)
+            
+            # 모든 아이템에 doc_id 저장
+            title_item.setData(Qt.UserRole, doc_id)
+            date_item.setData(Qt.UserRole, doc_id)
+            tags_item.setData(Qt.UserRole, doc_id)
+
+            self.table.setItem(i, 0, title_item)
+            self.table.setItem(i, 1, date_item)
+            self.table.setItem(i, 2, tags_item)
     def update_paging_buttons(self, prev_enabled, next_enabled, page_num):
         self.prev_button.setEnabled(prev_enabled); self.next_button.setEnabled(next_enabled); self.page_label.setText(f"{page_num} 페이지")
     def closeEvent(self, event): event.ignore(); self.hide()

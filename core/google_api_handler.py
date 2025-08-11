@@ -1,9 +1,12 @@
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 from core.auth import get_credentials
 from core import config_manager
 import datetime
 import markdown
 import os
+import re
+import uuid
 
 def get_services():
     creds = get_credentials()
@@ -12,11 +15,89 @@ def get_services():
     drive_service = build('drive', 'v3', credentials=creds)
     return docs_service, sheets_service, drive_service
 
+IMAGE_FOLDER_NAME = "Akashic Records Images"
+IMAGE_FOLDER_ID = None
+
+def _get_or_create_image_folder(drive_service):
+    global IMAGE_FOLDER_ID
+    if IMAGE_FOLDER_ID:
+        return IMAGE_FOLDER_ID
+    
+    MEMO_FOLDER_ID = config_manager.get_setting('Google', 'folder_id')
+    q = f"name='{IMAGE_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and '{MEMO_FOLDER_ID}' in parents and trashed=false"
+    response = drive_service.files().list(q=q, spaces='drive', fields='files(id)').execute()
+    files = response.get('files', [])
+    
+    if files:
+        IMAGE_FOLDER_ID = files[0].get('id')
+        return IMAGE_FOLDER_ID
+    else:
+        file_metadata = {
+            'name': IMAGE_FOLDER_NAME,
+            'mimeType': 'application/vnd.google-apps.folder',
+            'parents': [MEMO_FOLDER_ID]
+        }
+        file = drive_service.files().create(body=file_metadata, fields='id').execute()
+        IMAGE_FOLDER_ID = file.get('id')
+        return IMAGE_FOLDER_ID
+
+def _upload_image_to_drive(drive_service, image_path):
+    try:
+        image_folder_id = _get_or_create_image_folder(drive_service)
+        
+        file_name = os.path.basename(image_path)
+        unique_file_name = f"{uuid.uuid4()}_{file_name}"
+
+        file_metadata = {'name': unique_file_name, 'parents': [image_folder_id]}
+        media = MediaFileUpload(image_path, mimetype='image/jpeg') # MimeType can be more dynamic
+        
+        file = drive_service.files().create(body=file_metadata, media_body=media, fields='id, webContentLink').execute()
+        
+        # Make the file publicly readable
+        permission = {'type': 'anyone', 'role': 'reader'}
+        drive_service.permissions().create(fileId=file.get('id'), body=permission).execute()
+        
+        # Re-fetch the file to get the updated webContentLink
+        updated_file = drive_service.files().get(fileId=file.get('id'), fields='webContentLink').execute()
+        return updated_file.get('webContentLink')
+    except Exception as e:
+        print(f"이미지 업로드 실패: {image_path}, 오류: {e}")
+        return None
+
+def _process_images_for_upload(drive_service, markdown_content):
+    # Regex to find markdown image tags with local paths
+    # It should not match http/https links
+    pattern = re.compile(r'\!\[(.*?)\]\((?!https?://)(.*?)\)')
+    
+    new_content = markdown_content
+    matches = pattern.finditer(markdown_content)
+    
+    for match in matches:
+        alt_text = match.group(1)
+        local_path = match.group(2)
+        
+        if os.path.exists(local_path):
+            print(f"로컬 이미지 발견: {local_path}")
+            image_url = _upload_image_to_drive(drive_service, local_path)
+            if image_url:
+                print(f"업로드 성공: {image_url}")
+                # Replace the local path with the new URL in the content
+                original_tag = f"![{alt_text}]({local_path})"
+                new_tag = f"![{alt_text}]({image_url})"
+                new_content = new_content.replace(original_tag, new_tag)
+        else:
+            print(f"이미지 경로를 찾을 수 없음: {local_path}")
+            
+    return new_content
+
 def save_memo(title, markdown_content, tags_text):
     docs_service, sheets_service, drive_service = get_services()
     SPREADSHEET_ID = config_manager.get_setting('Google', 'spreadsheet_id')
     MEMO_FOLDER_ID = config_manager.get_setting('Google', 'folder_id')
     try:
+        # Process images before saving
+        processed_content = _process_images_for_upload(drive_service, markdown_content)
+
         doc_body = {'title': title}
         doc = docs_service.documents().create(body=doc_body).execute()
         doc_id = doc.get('documentId')
@@ -28,30 +109,36 @@ def save_memo(title, markdown_content, tags_text):
                 fileId=doc_id, addParents=MEMO_FOLDER_ID,
                 removeParents=previous_parents, fields='id, parents').execute()
 
-        requests_body = [{'insertText': {'location': {'index': 1}, 'text': markdown_content}}]
-        docs_service.documents().batchUpdate(documentId=doc_id, body={'requests': requests_body}).execute()
+        requests_body = [{'insertText': {'location': {'index': 1}, 'text': processed_content}}]
+        if processed_content:
+            docs_service.documents().batchUpdate(documentId=doc_id, body={'requests': requests_body}).execute()
         
         now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         row_data = [title, now, doc_id, tags_text]
         sheets_service.spreadsheets().values().append(
             spreadsheetId=SPREADSHEET_ID, range='A1', valueInputOption='USER_ENTERED',
             insertDataOption='INSERT_ROWS', body={'values': [row_data]}).execute()
-        return True
+        return True, doc_id
     except Exception as e:
         print(f"메모 저장 중 오류 발생: {e}")
-        return False
+        return False, None
 
 def update_memo(doc_id, new_title, markdown_content, tags_text):
     docs_service, sheets_service, drive_service = get_services()
     SPREADSHEET_ID = config_manager.get_setting('Google', 'spreadsheet_id')
     try:
+        # Process images before updating
+        processed_content = _process_images_for_upload(drive_service, markdown_content)
+
         doc = docs_service.documents().get(documentId=doc_id).execute()
         end_index = doc.get('body').get('content')[-1].get('endIndex') - 1
         
         requests_body = []
         if end_index > 1:
             requests_body.append({'deleteContentRange': {'range': {'startIndex': 1, 'endIndex': end_index}}})
-        requests_body.append({'insertText': {'location': {'index': 1}, 'text': markdown_content}})
+        
+        if processed_content:
+            requests_body.append({'insertText': {'location': {'index': 1}, 'text': processed_content}})
 
         if requests_body:
             docs_service.documents().batchUpdate(documentId=doc_id, body={'requests': requests_body}).execute()
@@ -63,10 +150,10 @@ def update_memo(doc_id, new_title, markdown_content, tags_text):
         for i, row in enumerate(values):
             if row and row[0] == doc_id: row_number = i + 1; break
         if row_number != -1:
-            # 제목(A열)과 태그(D열)를 동시에 업데이트
+            now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             sheets_service.spreadsheets().values().update(
                 spreadsheetId=SPREADSHEET_ID, range=f'A{row_number}',
-                valueInputOption='USER_ENTERED', body={'values': [[new_title]]}).execute()
+                valueInputOption='USER_ENTERED', body={'values': [[new_title, now]]}).execute()
             sheets_service.spreadsheets().values().update(
                 spreadsheetId=SPREADSHEET_ID, range=f'D{row_number}',
                 valueInputOption='USER_ENTERED', body={'values': [[tags_text]]}).execute()
@@ -84,16 +171,32 @@ def load_doc_content(doc_id, as_html=True, body_only=False):
     docs_service, sheets_service, _ = get_services()
     SPREADSHEET_ID = config_manager.get_setting('Google', 'spreadsheet_id')
     try:
-        doc = docs_service.documents().get(documentId=doc_id).execute()
+        # Request inlineObjects to get image data
+        doc = docs_service.documents().get(documentId=doc_id, fields="title,body(content),inlineObjects").execute()
         title = doc.get('title', '제목 없음')
         
         plain_text_parts = []
         body_content = doc.get('body').get('content')
+        
+        # A map to hold image URLs by their object ID
+        image_urls = {}
+        if 'inlineObjects' in doc:
+            for obj_id, obj_data in doc['inlineObjects'].items():
+                img_props = obj_data.get('inlineObjectProperties', {}).get('embeddedObject', {}).get('imageProperties', {})
+                if 'contentUri' in img_props:
+                    image_urls[obj_id] = img_props['contentUri']
+
         for element in body_content:
             if 'paragraph' in element:
                 for pe in element.get('paragraph').get('elements', []):
                     if 'textRun' in pe:
                         plain_text_parts.append(pe.get('textRun').get('content', ''))
+                    elif 'inlineObjectElement' in pe:
+                        obj_id = pe['inlineObjectElement']['inlineObjectId']
+                        if obj_id in image_urls:
+                            # In markdown format, we represent the image with its URL
+                            plain_text_parts.append(f'![image]({image_urls[obj_id]})')
+
         plain_text = "".join(plain_text_parts)
 
         result = sheets_service.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range='C:D').execute()
@@ -105,12 +208,14 @@ def load_doc_content(doc_id, as_html=True, body_only=False):
         if not as_html:
             return title, plain_text.strip(), tags_text
             
+        # The markdown converter will now automatically handle the image URLs
         html_body = markdown.markdown(plain_text, extensions=['fenced_code', 'codehilite', 'tables', 'nl2br', 'sane_lists'])
         return title, html_body, tags_text
 
     except Exception as e:
         print(f"문서 내용 변환 중 오류 발생: {e}")
         return "오류", "<p>내용을 불러올 수 없습니다.</p>", ""
+
 
 
 def load_memo_list():

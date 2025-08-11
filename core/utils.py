@@ -1,17 +1,13 @@
 import sys
 import os
 
-def resource_path(relative_path, is_resource=True):
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
     try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
         base_path = sys._MEIPASS
-        if not is_resource: # 리소스 폴더가 아닌 프로젝트 루트 기준일 때
-            base_path = os.path.abspath(os.path.join(os.path.dirname(sys.executable), "..")) if hasattr(sys, 'frozen') else os.path.abspath(".")
-            return os.path.join(base_path, relative_path)
-
     except Exception:
+        # Not in a PyInstaller bundle, use the project root
         base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    
-    if is_resource:
-        return os.path.join(base_path, 'resources', relative_path)
-    else:
-        return os.path.join(base_path, relative_path)
+
+    return os.path.join(base_path, relative_path)
