@@ -1,10 +1,12 @@
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QUrl
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QUrl, QSize
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QLineEdit, QHBoxLayout,
                              QTextEdit, QPushButton, QTableWidget, QTableWidgetItem,
                              QHeaderView, QMessageBox, QMenu, QStatusBar, QLabel,
-                             QFormLayout, QCheckBox, QSplitter, QListWidget, QListWidgetItem, QTreeWidget, QTreeWidgetItem, QFrame, QFileDialog)
-from PyQt5.QtGui import QDesktopServices
+                             QFormLayout, QCheckBox, QSplitter, QListWidget,
+                             QListWidgetItem, QTreeWidget, QTreeWidgetItem, QFrame,
+                             QFileDialog, QToolBar, QAction, QSizePolicy)
+from PyQt5.QtGui import QDesktopServices, QFont, QTextCursor
 from core import config_manager
 import qtawesome as qta
 import os
@@ -48,6 +50,47 @@ class QuickLauncherWindow(QWidget):
         elif event.key() == Qt.Key_Up: self.results_list.setCurrentRow(max(self.results_list.currentRow() - 1, 0))
         else: super().keyPressEvent(event)
 
+class SearchWidget(QWidget):
+    search_edited = pyqtSignal(str)
+    find_next = pyqtSignal()
+    find_prev = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.initUI()
+
+    def initUI(self):
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        self.find_box = QLineEdit()
+        self.find_box.setPlaceholderText("내용에서 검색")
+        self.find_box.setFixedWidth(180)
+        self.find_box.textChanged.connect(self.search_edited.emit)
+        self.find_box.returnPressed.connect(self.find_next.emit)
+        layout.addWidget(self.find_box)
+
+        icon_color = '#495057'
+        find_prev_button = QPushButton(qta.icon('fa5s.chevron-up', color=icon_color), "")
+        find_prev_button.clicked.connect(self.find_prev.emit)
+        layout.addWidget(find_prev_button)
+
+        find_next_button = QPushButton(qta.icon('fa5s.chevron-down', color=icon_color), "")
+        find_next_button.clicked.connect(self.find_next.emit)
+        layout.addWidget(find_next_button)
+
+        self.setLayout(layout)
+
+    def focus_search_box(self):
+        self.find_box.setFocus()
+
+    def clear_search_box(self):
+        self.find_box.clear()
+
+    def get_search_text(self):
+        return self.find_box.text()
+
 class CustomWebEngineView(QWebEngineView):
     tags_edit_requested = pyqtSignal(str)
 
@@ -72,27 +115,140 @@ class CustomWebEngineView(QWebEngineView):
 class RichMemoViewWindow(QWidget):
     link_activated = pyqtSignal(QUrl)
     tags_edit_requested = pyqtSignal(str)
+    edit_requested = pyqtSignal()
+    open_in_gdocs_requested = pyqtSignal()
 
     def __init__(self):
-        super().__init__(); self.initUI()
+        super().__init__()
+        self.current_zoom_factor = 1.0
+        self.initUI()
 
     def initUI(self):
-        self.setWindowTitle('메모 보기'); self.setGeometry(250, 250, 600, 700); self.setStyleSheet("background-color: #ffffff;")
+        self.setWindowTitle('메모 보기')
+        self.setGeometry(250, 250, 700, 800)
+        self.setStyleSheet("background-color: #ffffff;")
+        
         layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
         self.content_display = CustomWebEngineView()
         self.page = LinkHandlingPage(self)
         self.content_display.setPage(self.page)
         self.page.linkClicked.connect(self.link_activated)
         self.content_display.tags_edit_requested.connect(self.tags_edit_requested.emit)
-        layout.addWidget(self.content_display); self.setLayout(layout)
+
+        toolbar = QToolBar("Main Toolbar")
+        toolbar.setObjectName("RichViewToolbar")
+        toolbar.setIconSize(QSize(22, 22))
+
+        icon_color = '#495057'
+        self.edit_action = QAction(qta.icon('fa5s.pencil-alt', color=icon_color), "편집", self)
+        self.edit_action.setToolTip("이 메모를 편집합니다.")
+        self.edit_action.triggered.connect(self.edit_requested.emit)
+        toolbar.addAction(self.edit_action)
+
+        self.gdocs_action = QAction(qta.icon('fa5b.google-drive', color=icon_color), "Google Docs에서 열기", self)
+        self.gdocs_action.setToolTip("웹 브라우저에서 Google Docs로 엽니다.")
+        self.gdocs_action.triggered.connect(self.open_in_gdocs_requested.emit)
+        toolbar.addAction(self.gdocs_action)
+        
+        toolbar.addSeparator()
+
+        find_button = QPushButton(qta.icon('fa5s.search', color=icon_color), "")
+        find_button.setToolTip("내용에서 텍스트를 검색합니다.")
+        find_button.setCheckable(True)
+        find_button.toggled.connect(self.toggle_find_box)
+        toolbar.addWidget(find_button)
+
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        toolbar.addWidget(spacer)
+
+        zoom_out_action = QAction(qta.icon('fa5s.search-minus', color=icon_color), "축소", self)
+        zoom_out_action.setToolTip("본문 축소")
+        zoom_out_action.triggered.connect(self.zoom_out)
+        toolbar.addAction(zoom_out_action)
+
+        self.zoom_label = QLabel(f"{int(self.current_zoom_factor * 100)}%")
+        self.zoom_label.setStyleSheet("padding: 0 8px; color: #333;")
+        toolbar.addWidget(self.zoom_label)
+
+        zoom_in_action = QAction(qta.icon('fa5s.search-plus', color=icon_color), "확대", self)
+        zoom_in_action.setToolTip("본문 확대")
+        zoom_in_action.triggered.connect(self.zoom_in)
+        toolbar.addAction(zoom_in_action)
+
+        toolbar_area = QFrame()
+        toolbar_area.setObjectName("ToolbarArea")
+        toolbar_area.setAutoFillBackground(True)
+        toolbar_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        toolbar_layout = QVBoxLayout()
+        toolbar_layout.setContentsMargins(0, 0, 0, 0)
+        toolbar_layout.setSpacing(0)
+        
+        toolbar_layout.addWidget(toolbar)
+
+        self.search_widget = SearchWidget(self)
+        self.search_widget.setObjectName("SearchWidget")
+        self.search_widget.setVisible(False)
+        
+        self.search_widget.search_edited.connect(self.find_text)
+        self.search_widget.find_next.connect(self.find_next)
+        self.search_widget.find_prev.connect(self.find_prev)
+        toolbar_layout.addWidget(self.search_widget)
+        
+        toolbar_area.setLayout(toolbar_layout)
+        layout.addWidget(toolbar_area)
+
+        layout.addWidget(self.content_display)
+        self.setLayout(layout)
 
     def set_content(self, title, html_content):
         self.setWindowTitle(title)
-        base_url = QUrl.fromLocalFile(config_manager.APP_DATA_DIR.replace('\\', '/') + '/')
+        base_url = QUrl.fromLocalFile(os.path.abspath(os.getcwd()).replace('\\', '/') + '/')
         self.content_display.setHtml(html_content, base_url)
-        self.show(); self.activateWindow(); self.raise_()
+        self.content_display.setZoomFactor(self.current_zoom_factor)
+        self.show()
+        self.activateWindow()
+        self.raise_()
 
-    def closeEvent(self, event): self.hide()
+    def zoom_in(self):
+        self.current_zoom_factor = min(2.0, self.current_zoom_factor + 0.1)
+        self.content_display.setZoomFactor(self.current_zoom_factor)
+        self.zoom_label.setText(f"{int(self.current_zoom_factor * 100)}%")
+
+    def zoom_out(self):
+        self.current_zoom_factor = max(0.5, self.current_zoom_factor - 0.1)
+        self.content_display.setZoomFactor(self.current_zoom_factor)
+        self.zoom_label.setText(f"{int(self.current_zoom_factor * 100)}%")
+
+    def toggle_find_box(self, checked):
+        self.search_widget.setVisible(checked)
+        if checked:
+            self.search_widget.focus_search_box()
+        else:
+            self.search_widget.clear_search_box()
+
+    def find_text(self, text):
+        if text:
+            self.content_display.findText(text)
+        else:
+            self.content_display.findText("")
+
+    def find_next(self):
+        text = self.search_widget.get_search_text()
+        if text:
+            self.content_display.findText(text)
+
+    def find_prev(self):
+        text = self.search_widget.get_search_text()
+        if text:
+            self.content_display.findText(text, QWebEnginePage.FindBackward)
+
+
+    def closeEvent(self, event):
+        self.hide()
 
 class MarkdownEditorWindow(QWidget):
     def __init__(self):
@@ -108,11 +264,16 @@ class MarkdownEditorWindow(QWidget):
         self.add_image_button.setIcon(qta.icon('fa5s.image', color='white'))
         self.add_image_button.clicked.connect(self.add_image)
 
+        self.add_file_button = QPushButton(' 파일 추가')
+        self.add_file_button.setIcon(qta.icon('fa5s.paperclip', color='white'))
+        self.add_file_button.clicked.connect(self.add_file)
+
         self.save_button = QPushButton(' 저장')
         self.save_button.setIcon(qta.icon('fa5s.save', color='white'))
         
         top_layout.addWidget(self.title_input)
         top_layout.addWidget(self.add_image_button)
+        top_layout.addWidget(self.add_file_button)
         top_layout.addWidget(self.save_button)
         main_layout.addLayout(top_layout)
         splitter = QSplitter(Qt.Horizontal); self.editor = QTextEdit()
@@ -147,6 +308,24 @@ class MarkdownEditorWindow(QWidget):
             # 마크다운 이미지 태그로 변환하여 에디터에 삽입
             markdown_image_tag = f"![image](resources/images/{os.path.basename(file_name)})"
             self.editor.insertPlainText(markdown_image_tag)
+
+    def add_file(self):
+        file_name, _ = QFileDialog.getOpenFileName(self, "파일 선택", "", "All Files (*)")
+        if file_name:
+            import os
+            import shutil
+            from core.utils import resource_path
+
+            file_dir = resource_path("resources/files")
+            if not os.path.exists(file_dir):
+                os.makedirs(file_dir)
+            
+            new_file_path = os.path.join(file_dir, os.path.basename(file_name))
+            shutil.copy(file_name, new_file_path)
+            
+            # 마크다운 링크로 변환하여 에디터에 삽입
+            markdown_link = f"[{os.path.basename(file_name)}](resources/files/{os.path.basename(file_name)})"
+            self.editor.insertPlainText(markdown_link)
 
     def closeEvent(self, event): self.clear_fields(); self.hide(); event.ignore()
 

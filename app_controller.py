@@ -105,6 +105,8 @@ class AppController:
         self.quick_launcher.memo_selected.connect(self.on_launcher_item_selected)
         self.rich_viewer.link_activated.connect(self.on_link_activated)
         self.rich_viewer.tags_edit_requested.connect(self.edit_tags_from_viewer)
+        self.rich_viewer.edit_requested.connect(self.edit_current_viewing_memo)
+        self.rich_viewer.open_in_gdocs_requested.connect(self.open_current_memo_in_gdocs)
 
     def setup_hotkeys(self):
         try:
@@ -742,3 +744,15 @@ class AppController:
 
     def stay_awake(self):
         pass
+
+    def edit_current_viewing_memo(self):
+        if self.current_viewing_doc_id:
+            print(f"뷰어에서 편집 요청: {self.current_viewing_doc_id}")
+            self.rich_viewer.hide() # 현재 뷰어 창은 닫고
+            self.edit_memo(self.current_viewing_doc_id) # 편집 창을 연다
+    
+    def open_current_memo_in_gdocs(self):
+        if self.current_viewing_doc_id:
+            url_string = f"https://docs.google.com/document/d/{self.current_viewing_doc_id}/edit"
+            QDesktopServices.openUrl(QUrl(url_string))
+            print(f"Google Docs에서 열기: {url_string}")
