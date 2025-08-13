@@ -31,7 +31,7 @@ def load_config():
             'spreadsheet_id': 'YOUR_SPREADSHEET_ID', # 기본값은 비워두거나 예시 ID 사용
             'folder_id': 'YOUR_FOLDER_ID'
         },
-        'Display': {'page_size': '30','custom_css_path': ''}
+        'Display': {'page_size': '30','custom_css_path': '', 'autosave_interval_ms': '3000'}
     }
     
     changes_made = False
@@ -56,7 +56,7 @@ def create_default_config():
 def get_setting(section, key):
     return config.get(section, key)
 
-def save_settings(hotkey_new, hotkey_list, hotkey_launcher, sheet_id, folder_id, page_size,custom_css_path):
+def save_settings(hotkey_new, hotkey_list, hotkey_launcher, sheet_id, folder_id, page_size, custom_css_path, autosave_interval_ms):
     config['Hotkeys']['new_memo'] = hotkey_new
     config['Hotkeys']['list_memos'] = hotkey_list
     config['Hotkeys']['quick_launcher'] = hotkey_launcher
@@ -64,6 +64,7 @@ def save_settings(hotkey_new, hotkey_list, hotkey_launcher, sheet_id, folder_id,
     config['Google']['folder_id'] = folder_id
     config['Display']['page_size'] = page_size
     config['Display']['custom_css_path'] = custom_css_path
+    config['Display']['autosave_interval_ms'] = autosave_interval_ms
     with open(CONFIG_FILE, 'w', encoding='utf-8') as configfile:
         config.write(configfile)
 
@@ -98,3 +99,30 @@ def set_startup(enabled: bool):
         return True
     except Exception:
         return False
+    
+def get_favorites():
+    if not config.has_section('Favorites'):
+        return []
+    pinned_ids_str = config.get('Favorites', 'pinned_ids', fallback='')
+    if not pinned_ids_str:
+        return []
+    return pinned_ids_str.split(',')
+
+def set_favorites(id_list):
+    if not config.has_section('Favorites'):
+        config.add_section('Favorites')
+    config.set('Favorites', 'pinned_ids', ",".join(id_list))
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as configfile:
+        config.write(configfile)
+
+def add_favorite(doc_id):
+    favs = get_favorites()
+    if doc_id not in favs:
+        favs.append(doc_id)
+        set_favorites(favs)
+
+def remove_favorite(doc_id):
+    favs = get_favorites()
+    if doc_id in favs:
+        favs.remove(doc_id)
+        set_favorites(favs)

@@ -18,6 +18,7 @@ from PIL import Image
 from core import google_api_handler, config_manager
 from core.utils import resource_path
 from app_windows import MarkdownEditorWindow, MemoListWindow, SettingsWindow, RichMemoViewWindow, QuickLauncherWindow
+import qtawesome as qta
 
 class SignalEmitter(QObject):
     show_new_memo = pyqtSignal()
@@ -30,6 +31,8 @@ class SignalEmitter(QObject):
     nav_tree_updated = pyqtSignal(set, list)
     status_update = pyqtSignal(str, int)
     notification = pyqtSignal(str, str)
+    favorite_status_changed = pyqtSignal(str, bool)
+    auto_save_status_update = pyqtSignal(str)
 
 class AppController:
     def __init__(self, app):
@@ -66,11 +69,19 @@ class AppController:
         self.search_timer.timeout.connect(self.perform_search)
         self.icon = None
         self.launcher_mode = 'memos'
+
+        self.auto_save_timer = QTimer()
+        self.auto_save_timer.setSingleShot(True)
+        self.auto_save_interval_ms = 3000
+
         self.connect_signals_and_slots()
         self.load_cache_only(initial_load=True)
         self.setup_hotkeys()
         self.setup_tray_icon()
         QTimer.singleShot(2000, self.start_initial_sync)
+
+        self.favorites = []
+        self.load_favorites()
 
     def connect_signals_and_slots(self):
         self.emitter.show_new_memo.connect(self.show_new_memo_window, Qt.QueuedConnection)
@@ -94,7 +105,7 @@ class AppController:
         self.memo_list.refresh_button.clicked.connect(self.start_initial_sync)
         self.memo_list.navigation_selected.connect(self.on_navigation_selected)
         
-        self.memo_editor.save_button.clicked.connect(self.save_memo)
+        self.memo_editor.save_button.clicked.connect(lambda: self.save_memo(is_auto_save=False))
         self.memo_editor.preview_timer.timeout.connect(self.update_editor_preview)
         self.memo_editor.editor.textChanged.connect(lambda: self.memo_editor.preview_timer.start(500))
         
@@ -107,6 +118,17 @@ class AppController:
         self.rich_viewer.tags_edit_requested.connect(self.edit_tags_from_viewer)
         self.rich_viewer.edit_requested.connect(self.edit_current_viewing_memo)
         self.rich_viewer.open_in_gdocs_requested.connect(self.open_current_memo_in_gdocs)
+
+        self.rich_viewer.favorite_toggled.connect(self.toggle_favorite_from_viewer)
+        self.memo_list.favorite_toggled_from_list.connect(self.toggle_favorite)
+        self.emitter.favorite_status_changed.connect(self.on_favorite_status_changed)
+
+        # 자동 저장 관련
+        self.memo_editor.editor.textChanged.connect(self.on_editor_text_changed)
+        self.memo_editor.title_input.textChanged.connect(self.on_editor_text_changed)
+        self.memo_editor.tag_input.textChanged.connect(self.on_editor_text_changed)
+        self.auto_save_timer.timeout.connect(lambda: self.save_memo(is_auto_save=True))
+        self.emitter.auto_save_status_update.connect(self.memo_editor.update_auto_save_status, Qt.QueuedConnection)
 
     def setup_hotkeys(self):
         try:
@@ -219,28 +241,43 @@ class AppController:
                 tags = [t.strip().lstrip('#') for t in row[3].replace(',', ' ').split() if t.strip().startswith('#')]
                 self.all_tags.update(tags)
 
-    def on_navigation_selected(self, selected_item_text):
-        # "태그 (12)" 와 같은 형식에서 텍스트 부분만 추출
-        clean_selected_item = re.sub(r'\s*\(\d+\)', '', selected_item_text).strip()
-
-        if clean_selected_item in ["태그", ""]:
-            return
-
+    def on_navigation_selected(self, selected_item_id):
         self.memo_list.search_bar.clear()
         self.memo_list.full_text_search_check.setChecked(False)
 
+        # id가 favorites이면 즐겨찾기 목록을 표시
+        if selected_item_id == "favorites":
+            fav_memos = [row for row in self.local_cache if len(row) > 2 and row[2] in self.favorites]
+            self.emitter.list_data_loaded.emit(fav_memos, True)
+            return
+
+        # "태그 (12)" 와 같은 형식에서 텍스트 부분만 추출
+        clean_selected_item = re.sub(r'\s*\(\d+\)', '', selected_item_id).strip()
+
         if clean_selected_item == "전체 메모":
             self.emitter.list_data_loaded.emit(self.local_cache, True)
-        else:
+        elif clean_selected_item not in ["태그", ""]:
             # 선택된 태그를 포함하는 메모만 필터링
             filtered_data = [
-                row for row in self.local_cache 
+                row for row in self.local_cache
                 if len(row) > 3 and row[3] and clean_selected_item in [tag.strip().lstrip('#') for tag in row[3].replace(',', ' ').split()]
             ]
             self.emitter.list_data_loaded.emit(filtered_data, True)
 
+    def on_editor_text_changed(self):
+        self.emitter.auto_save_status_update.emit("변경사항이 있습니다...")
+        try:
+            interval_str = config_manager.get_setting('Display', 'autosave_interval_ms')
+            self.auto_save_interval_ms = int(interval_str)
+        except (ValueError, TypeError):
+            self.auto_save_interval_ms = 0 # 기본값 또는 오류 처리
+
+        if self.auto_save_interval_ms > 0:
+            self.auto_save_timer.start(self.auto_save_interval_ms)
+
     def show_new_memo_window(self):
         self.memo_editor.clear_fields()
+        self.emitter.auto_save_status_update.emit("새 메모")
         self.memo_editor.show()
         self.memo_editor.activateWindow()
 
@@ -344,28 +381,42 @@ class AppController:
         if self.next_page_token:
             self.perform_search(page_token=self.next_page_token, is_next=True)
 
-    def save_memo(self):
+    def save_memo(self, is_auto_save=False):
+        self.auto_save_timer.stop()
         editor = self.memo_editor
         title = editor.title_input.text()
         content = editor.editor.toPlainText()
         tags = editor.tag_input.text()
         doc_id = editor.current_doc_id
-        if not (title and content):
-            QMessageBox.warning(editor, "경고", "제목과 내용을 모두 입력해야 합니다.")
-            return
-        if doc_id:
-            threading.Thread(target=self.update_memo_thread, args=(doc_id, title, content, tags)).start()
-        else:
-            threading.Thread(target=self.save_memo_thread, args=(title, content, tags)).start()
-        editor.close()
 
-    def save_memo_thread(self, title, content, tags):
+        if not (title and content):
+            if not is_auto_save:
+                QMessageBox.warning(editor, "경고", "제목과 내용을 모두 입력해야 합니다.")
+            return
+
+        self.emitter.auto_save_status_update.emit("저장 중...")
+
+        if doc_id:
+            threading.Thread(target=self.update_memo_thread, args=(doc_id, title, content, tags, is_auto_save), daemon=True).start()
+        else:
+            threading.Thread(target=self.save_memo_thread, args=(title, content, tags, is_auto_save), daemon=True).start()
+        
+        if not is_auto_save:
+            editor.close()
+
+    def save_memo_thread(self, title, content, tags, is_auto_save=False):
         from datetime import datetime
         self.emitter.status_update.emit(f"'{title}' 저장 중...", 0)
         success, new_doc_id = google_api_handler.save_memo(title, content, tags)
         if success:
-            self.emitter.notification.emit("저장 완료", f"'{title}' 메모가 저장되었습니다.")
+            self.emitter.auto_save_status_update.emit("모든 변경사항이 저장됨")
+            if not is_auto_save:
+                self.emitter.notification.emit("저장 완료", f"'{title}' 메모가 저장되었습니다.")
             
+            # 새 문서 ID를 에디터에 설정 (자동 저장 후 수동 저장 시 업데이트를 위함)
+            if self.memo_editor.isVisible() and not self.memo_editor.current_doc_id:
+                self.memo_editor.current_doc_id = new_doc_id
+
             # 로컬 캐시에 새 메모 추가
             current_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             new_row = [title, current_date, new_doc_id, tags]
@@ -389,17 +440,20 @@ class AppController:
             self.emitter.status_update.emit("저장 완료.", 5000)
         else:
             self.emitter.status_update.emit("저장 실패", 5000)
+            self.emitter.auto_save_status_update.emit("저장 실패")
 
-    def update_memo_thread(self, doc_id, title, content, tags):
+    def update_memo_thread(self, doc_id, title, content, tags, is_auto_save=False):
         from datetime import datetime
         self.emitter.status_update.emit(f"'{title}' 업데이트 중...", 0)
         success = google_api_handler.update_memo(doc_id, title, content, tags)
         if success:
+            self.emitter.auto_save_status_update.emit("모든 변경사항이 저장됨")
             cache_path_html = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.html")
             if os.path.exists(cache_path_html):
                 os.remove(cache_path_html)
             
-            self.emitter.notification.emit("업데이트 완료", f"'{title}' 메모가 업데이트되었습니다.")
+            if not is_auto_save:
+                self.emitter.notification.emit("업데이트 완료", f"'{title}' 메모가 업데이트되었습니다.")
 
             # 로컬 캐시 직접 업데이트
             current_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -446,6 +500,8 @@ class AppController:
         if self.rich_viewer.isVisible() and self.current_viewing_doc_id == doc_id:
             self.rich_viewer.activateWindow()
             return
+
+        self.rich_viewer.update_favorite_status(doc_id in self.favorites)
         
         self.current_viewing_doc_id = doc_id
         
@@ -756,3 +812,44 @@ class AppController:
             url_string = f"https://docs.google.com/document/d/{self.current_viewing_doc_id}/edit"
             QDesktopServices.openUrl(QUrl(url_string))
             print(f"Google Docs에서 열기: {url_string}")
+
+    def load_favorites(self):
+        self.favorites = config_manager.get_favorites()
+
+    def toggle_favorite(self, doc_id):
+        if doc_id in self.favorites:
+            self.favorites.remove(doc_id)
+            config_manager.remove_favorite(doc_id)
+            self.emitter.status_update.emit("즐겨찾기에서 해제되었습니다.", 3000)
+            self.emitter.favorite_status_changed.emit(doc_id, False)
+        else:
+            self.favorites.append(doc_id)
+            config_manager.add_favorite(doc_id)
+            self.emitter.status_update.emit("즐겨찾기에 추가되었습니다.", 3000)
+            self.emitter.favorite_status_changed.emit(doc_id, True)
+        
+        # 목록 창이 '즐겨찾기' 뷰 상태였다면, 목록을 즉시 새로고침
+        current_item = self.memo_list.nav_tree.currentItem()
+        if current_item and current_item.data(0, Qt.UserRole) == "favorites":
+            self.on_navigation_selected("favorites")
+            
+    def toggle_favorite_from_viewer(self):
+        if self.current_viewing_doc_id:
+            self.toggle_favorite(self.current_viewing_doc_id)
+
+    def on_favorite_status_changed(self, doc_id, is_favorite):
+        # 1. 목록 창의 아이콘 업데이트
+        for row in range(self.memo_list.table.rowCount()):
+            item = self.memo_list.table.item(row, 1) # 제목 아이템
+            if item and item.data(Qt.UserRole) == doc_id:
+                fav_item = self.memo_list.table.item(row, 0)
+                if fav_item:
+                    icon = qta.icon('fa5s.star', color='#f0c420') if is_favorite else qta.icon('fa5s.star', color='#aaa')
+                    fav_item.setIcon(icon)
+                break
+        
+        if self.rich_viewer.isVisible() and self.current_viewing_doc_id == doc_id:
+            self.rich_viewer.update_favorite_status(is_favorite)
+
+        # 2. 네비게이션 트리 업데이트
+        self.emitter.nav_tree_updated.emit(self.all_tags, self.local_cache)

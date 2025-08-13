@@ -1,12 +1,8 @@
-# main.spec
-
 import os
 
 block_cipher = None
 spec_dir = os.getcwd()
 
-# Analysis 객체는 PyInstaller가 내부적으로 생성하므로,
-# 우리는 Analysis의 속성인 a.datas만 수정해주면 됩니다.
 a = Analysis(
     ['main.py'],
     pathex=[],
