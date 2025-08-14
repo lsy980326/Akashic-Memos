@@ -9,7 +9,7 @@ import requests
 from bs4 import BeautifulSoup
 import hashlib
 from PyQt5.QtWidgets import QApplication, QMessageBox, QMenu, QDesktopWidget, QInputDialog
-from PyQt5.QtCore import QObject, pyqtSignal, QTimer, Qt, QUrl
+from PyQt5.QtCore import QObject, pyqtSignal, QTimer, Qt, QUrl, QByteArray
 from PyQt5.QtGui import QDesktopServices, QFont, QIcon
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage
 import keyboard
@@ -17,7 +17,7 @@ from pystray import Icon as pystray_icon, Menu as pystray_menu, MenuItem as pyst
 from PIL import Image
 from core import google_api_handler, config_manager
 from core.utils import resource_path
-from app_windows import MarkdownEditorWindow, MemoListWindow, SettingsWindow, RichMemoViewWindow, QuickLauncherWindow
+from app_windows import MarkdownEditorWindow, MemoListWindow, SettingsWindow, RichMemoViewWindow, QuickLauncherWindow, TodoDashboardWindow, TodoItemWidget
 import qtawesome as qta
 
 class SignalEmitter(QObject):
@@ -33,6 +33,10 @@ class SignalEmitter(QObject):
     notification = pyqtSignal(str, str)
     favorite_status_changed = pyqtSignal(str, bool)
     auto_save_status_update = pyqtSignal(str)
+    todo_list_updated = pyqtSignal(list)
+    sync_finished_update_list = pyqtSignal()
+    tasks_data_loaded = pyqtSignal(dict)
+    toggle_todo_dashboard_signal = pyqtSignal()
 
 class AppController:
     def __init__(self, app):
@@ -56,6 +60,7 @@ class AppController:
         self.rich_viewer.setWindowIcon(app_icon)
         self.quick_launcher = QuickLauncherWindow()
         self.quick_launcher.setWindowIcon(app_icon)
+        self.todo_dashboard = TodoDashboardWindow()
 
         self.local_cache = []
         self.all_tags = set()
@@ -69,6 +74,8 @@ class AppController:
         self.search_timer.timeout.connect(self.perform_search)
         self.icon = None
         self.launcher_mode = 'memos'
+        self.is_loading_tasks = False
+        self.cache_lock = threading.Lock()
 
         self.auto_save_timer = QTimer()
         self.auto_save_timer.setSingleShot(True)
@@ -91,11 +98,21 @@ class AppController:
         self.emitter.list_data_loaded.connect(self.memo_list.populate_table, Qt.QueuedConnection)
         self.emitter.nav_tree_updated.connect(self.memo_list.update_nav_tree, Qt.QueuedConnection)
         self.emitter.show_edit_memo.connect(self.memo_editor.open_document, Qt.QueuedConnection)
+        self.emitter.show_edit_memo.connect(self.open_editor_with_content, Qt.QueuedConnection)
         self.emitter.show_rich_view.connect(self.rich_viewer.set_content, Qt.QueuedConnection)
         self.emitter.status_update.connect(self.memo_list.statusBar.showMessage, Qt.QueuedConnection)
         self.emitter.notification.connect(self.show_notification, Qt.QueuedConnection)
-        
+        self.emitter.sync_finished_update_list.connect(self.on_sync_finished_update_list, Qt.QueuedConnection)
+        self.emitter.todo_list_updated.connect(self.todo_dashboard.update_tasks, Qt.QueuedConnection)
+        self.emitter.tasks_data_loaded.connect(self.process_loaded_tasks, Qt.QueuedConnection)
+        self.emitter.toggle_todo_dashboard_signal.connect(self.toggle_todo_dashboard, Qt.QueuedConnection)
+
         self.search_timer.timeout.connect(self.perform_search)
+        
+        self.todo_dashboard.task_toggled.connect(self.on_task_toggled)
+        self.todo_dashboard.item_clicked.connect(self.view_memo_by_id)
+        self.todo_dashboard.refresh_requested.connect(self.refresh_todo_dashboard)
+
         self.memo_list.search_bar.textChanged.connect(self.on_search_text_changed)
         self.memo_list.full_text_search_check.stateChanged.connect(self.search_mode_changed)
         self.memo_list.table.itemDoubleClicked.connect(self.view_memo_from_item)
@@ -129,6 +146,7 @@ class AppController:
         self.memo_editor.tag_input.textChanged.connect(self.on_editor_text_changed)
         self.auto_save_timer.timeout.connect(lambda: self.save_memo(is_auto_save=True))
         self.emitter.auto_save_status_update.connect(self.memo_editor.update_auto_save_status, Qt.QueuedConnection)
+        
 
     def setup_hotkeys(self):
         try:
@@ -142,13 +160,18 @@ class AppController:
         except Exception as e:
             print(f"단축키 등록 실패: {e}")
 
+    def request_toggle_todo_dashboard(self):
+        self.emitter.toggle_todo_dashboard_signal.emit()
+
     def setup_tray_icon(self):
         try:
             image = Image.open(resource_path("resources/icon.ico"))
         except:
             image = Image.new('RGB', (64, 64), color='blue')
         menu = pystray_menu(
-            pystray_menu_item('새 메모 작성', lambda: self.emitter.show_new_memo.emit(), default=True),
+            pystray_menu_item('오늘 할 일 보기', self.request_toggle_todo_dashboard, default=True),
+            pystray_menu_item('---', None, enabled=False),
+            pystray_menu_item('새 메모 작성', lambda: self.emitter.show_new_memo.emit(),),
             pystray_menu_item('메모 목록 보기', lambda: self.emitter.show_list_memo.emit()),
             pystray_menu_item('빠른 실행', lambda: self.emitter.show_quick_launcher.emit()),
             pystray_menu_item('설정', lambda: self.emitter.show_settings.emit()),
@@ -199,27 +222,31 @@ class AppController:
                 results = [row[:3] for row in self.local_cache]
                 self.quick_launcher.update_results(results)
 
+    def on_sync_finished_update_list(self):
+        if self.memo_list.isVisible() and not self.memo_list.full_text_search_check.isChecked():
+            current_nav_item = self.memo_list.nav_tree.currentItem()
+            if current_nav_item:
+                self.on_navigation_selected(current_nav_item.text(0))
+
     def start_initial_sync(self):
         self.emitter.status_update.emit("최신 정보 동기화 중...", 2000)
         threading.Thread(target=self.sync_cache_thread, daemon=True).start()
 
     def sync_cache_thread(self):
         new_data = google_api_handler.load_memo_list()
-        if new_data is not None and new_data != self.local_cache:
-            self.local_cache = new_data
-            self.update_tags_from_cache()
-            try:
-                with open(config_manager.CACHE_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(self.local_cache, f, ensure_ascii=False, indent=4)
-            except IOError:
-                pass
-            
-            self.emitter.nav_tree_updated.emit(self.all_tags, self.local_cache)
-            if self.memo_list.isVisible() and not self.memo_list.full_text_search_check.isChecked():
-                current_nav_item = self.memo_list.nav_tree.currentItem()
-                if current_nav_item:
-                    self.on_navigation_selected(current_nav_item.text(0))
-            self.emitter.status_update.emit("동기화 완료.", 5000)
+        with self.cache_lock:
+            if new_data is not None and new_data != self.local_cache:
+                self.local_cache = new_data
+                self.update_tags_from_cache()
+                try:
+                    with open(config_manager.CACHE_FILE, 'w', encoding='utf-8') as f:
+                        json.dump(self.local_cache, f, ensure_ascii=False, indent=4)
+                except IOError:
+                    pass
+                
+                self.emitter.nav_tree_updated.emit(self.all_tags, self.local_cache)
+                self.emitter.sync_finished_update_list.emit()
+                self.emitter.status_update.emit("동기화 완료.", 5000)
 
     def load_cache_only(self, initial_load=False):
         try:
@@ -276,12 +303,20 @@ class AppController:
             self.auto_save_timer.start(self.auto_save_interval_ms)
 
     def show_new_memo_window(self):
+        geometry_hex = config_manager.get_window_state(self.memo_editor.window_name)
+        if geometry_hex:
+            self.memo_editor.restoreGeometry(QByteArray.fromHex(geometry_hex.encode('utf-8')))
+
         self.memo_editor.clear_fields()
         self.emitter.auto_save_status_update.emit("새 메모")
         self.memo_editor.show()
         self.memo_editor.activateWindow()
 
     def show_memo_list_window(self):
+        geometry_hex = config_manager.get_window_state(self.memo_list.window_name)
+        if geometry_hex:
+            self.memo_list.restoreGeometry(QByteArray.fromHex(geometry_hex.encode('utf-8')))
+
         self.memo_list.show()
         self.memo_list.activateWindow()
         self.memo_list.raise_()
@@ -640,6 +675,7 @@ class AppController:
         menu = QMenu()
         edit_action = menu.addAction("편집하기")
         edit_tags_action = menu.addAction("태그 수정하기")
+        menu.addSeparator()
         delete_action = menu.addAction("삭제하기")
         action = menu.exec_(self.memo_list.table.mapToGlobal(pos))
         if action == edit_action:
@@ -711,6 +747,7 @@ class AppController:
     def _get_final_html(self, title, html_body, tags_text=""):
         # 위키 링크 [[문서제목]]을 하이퍼링크로 변환
         title_to_id_map = {row[0]: row[2] for row in self.local_cache if len(row) > 2}
+
         def replace_wiki_links(match):
             linked_title = match.group(1)
             doc_id = title_to_id_map.get(linked_title)
@@ -718,7 +755,15 @@ class AppController:
                 return f'<a href="memo://{doc_id}" title="메모 열기: {linked_title}">{linked_title}</a>'
             return f'<span class="broken-link" title="존재하지 않는 메모: {linked_title}">[[{linked_title}]]</span>'
         
+        def style_checkboxes(html):
+            # 완료되지 않은 체크박스
+            html = re.sub(r'<li>\[ \]', r'<li><span class="task-checkbox-empty"></span>', html)
+            # 완료된 체크박스: '✔'
+            html = re.sub(r'<li>\[x\]', r'<li><span class="task-checkbox-done"></span>', html)
+            return html
+
         parsed_body = re.sub(r'\[\[(.*?)\]\]', replace_wiki_links, html_body)
+        parsed_body = style_checkboxes(parsed_body)
 
         # 태그를 표시하고 클릭 가능하게 만듦
         tags_html = ""
@@ -853,3 +898,182 @@ class AppController:
 
         # 2. 네비게이션 트리 업데이트
         self.emitter.nav_tree_updated.emit(self.all_tags, self.local_cache)
+
+    def load_tasks_thread(self):
+        with self.cache_lock:
+            local_cache_copy = list(self.local_cache)
+        try:
+            contents = {}
+            for memo in local_cache_copy:
+                doc_id, source_memo = memo[2], memo[0]
+                cache_path = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.txt")
+                content = None
+                if os.path.exists(cache_path):
+                    try:
+                        with open(cache_path, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                    except Exception as e:
+                        print(f"Error reading cache for {doc_id}: {e}")
+
+                if content is None:
+                    _, markdown_content, _ = google_api_handler.load_doc_content(doc_id, as_html=False)
+                    if markdown_content:
+                        content = markdown_content
+                        try:
+                            cache_dir = os.path.dirname(cache_path)
+                            if not os.path.exists(cache_dir):
+                                os.makedirs(cache_dir)
+                            with open(cache_path, 'w', encoding='utf-8') as f:
+                                f.write(content)
+                        except Exception as e:
+                            print(f"Error writing cache for {doc_id}: {e}")
+                
+                if content:
+                    contents[doc_id] = {'content': content, 'source_memo': source_memo}
+            
+            self.emitter.tasks_data_loaded.emit(contents)
+
+        except Exception as e:
+            print(f"할 일 데이터 로딩 중 오류: {e}")
+            self.emitter.todo_list_updated.emit([])
+        finally:
+            self.is_loading_tasks = False
+    
+    def process_loaded_tasks(self, contents):
+        tasks = []
+        for doc_id, data in contents.items():
+            content = data['content']
+            source_memo = data['source_memo']
+            for line in content.split('\n'):
+                stripped_line = line.strip()
+                if stripped_line.startswith(("- [ ] ", "- [x] ")):
+                    is_checked = stripped_line.startswith("- [x] ")
+                    task_text = stripped_line[5:].strip()
+                    tasks.append({
+                        'doc_id': doc_id,
+                        'line_text': task_text,
+                        'original_line': stripped_line,
+                        'source_memo': source_memo,
+                        'is_checked': is_checked
+                    })
+        
+        tasks.sort(key=lambda x: x['is_checked'])
+        self.emitter.todo_list_updated.emit(tasks)
+
+    def toggle_todo_dashboard(self):
+        if self.is_loading_tasks: return
+        
+        if self.todo_dashboard.isVisible():
+            self.todo_dashboard.hide()
+        else:
+            # 먼저 로딩 상태로 창을 보여줌
+            self.todo_dashboard.show_message("🔄 할 일 목록을 불러오는 중...")
+            
+            screen_geometry = QApplication.primaryScreen().availableGeometry()
+            x = screen_geometry.width() - self.todo_dashboard.width() - 10
+            y = screen_geometry.height() - self.todo_dashboard.height() - 10
+            self.todo_dashboard.move(x, y); self.todo_dashboard.show(); self.todo_dashboard.activateWindow()
+
+            self.is_loading_tasks = True
+            threading.Thread(target=self.load_tasks_thread, daemon=True).start()
+
+    def on_task_toggled(self, task_info, is_checked):
+        for i in range(self.todo_dashboard.content_layout.count()):
+            widget = self.todo_dashboard.content_layout.itemAt(i).widget()
+            if isinstance(widget, TodoItemWidget) and widget.checkbox.property("task_info") == task_info:
+                widget.set_checked_state(is_checked); break
+        
+        # 백그라운드에서 실제 파일 업데이트
+        threading.Thread(target=self.update_task_thread, args=(task_info, is_checked), daemon=True).start()
+
+    def update_task_thread(self, task_info, is_checked):
+        success = google_api_handler.update_checklist_item(
+            task_info['doc_id'],
+            task_info['original_line'], # 'line_text' -> 'original_line'
+            is_checked
+        )
+        if success:
+            print("Task successfully updated in Google Docs.")
+            # 성공 시, 콘텐츠 캐시도 업데이트하여 데이터 일관성 유지
+            self.update_content_cache_after_toggle(task_info, is_checked)
+        else:
+            print("Failed to update task in Google Docs.")
+
+    def update_content_cache_after_toggle(self, task_info, is_checked):
+        doc_id = task_info['doc_id']
+        cache_path = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.txt")
+        if not os.path.exists(cache_path): 
+            print(f"Cache file not found for {doc_id}, cannot update.")
+            return
+        
+        try:
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+
+            new_line_prefix = "- [x] " if is_checked else "- [ ] "
+            original_line_lf = task_info['original_line']
+
+            new_lines = []
+            found = False
+            for line in lines:
+                # 개행문자 차이(CRLF, LF)를 고려하여 비교
+                if line.strip() == original_line_lf:
+                    new_lines.append(new_line_prefix + task_info['line_text'] + '\n')
+                    found = True
+                else:
+                    new_lines.append(line)
+            
+            if not found:
+                print(f"Original line not found in cache file: {original_line_lf}")
+                # 만약 못찾으면, 그냥 새로고침해서 서버로부터 다시 받도록 유도할 수 있음
+                return
+
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                f.writelines(new_lines)
+            print("Content cache updated successfully.")
+        except Exception as e:
+            print(f"Error updating content cache: {e}")
+
+    def open_editor_with_content(self, doc_id, title, markdown_content, tags_text):
+        geometry_hex = config_manager.get_window_state(self.memo_editor.window_name)
+        if geometry_hex:
+            self.memo_editor.restoreGeometry(QByteArray.fromHex(geometry_hex.encode('utf-8')))
+            
+        self.memo_editor.open_document(doc_id, title, markdown_content, tags_text)
+    
+    def sync_cache_and_reload_tasks(self):
+        print("메인 캐시 동기화 시작...")
+        new_data = google_api_handler.load_memo_list()
+        if new_data is not None:
+            with self.cache_lock:
+                self.local_cache = new_data
+                self.update_tags_from_cache()
+                try:
+                    with open(config_manager.CACHE_FILE, 'w', encoding='utf-8') as f:
+                        json.dump(self.local_cache, f, ensure_ascii=False, indent=4)
+                    print("메인 캐시 동기화 완료.")
+                except IOError:
+                    pass
+        
+        # 콘텐츠 캐시(.txt) 제거
+        print("콘텐츠 캐시 비우는 중...")
+        cache_dir = config_manager.CONTENT_CACHE_DIR
+        try:
+            for filename in os.listdir(cache_dir):
+                if filename.endswith(".txt"):
+                    os.remove(os.path.join(cache_dir, filename))
+            print("콘텐츠 캐시 비우기 완료.")
+        except Exception as e:
+            print(f"캐시 비우기 중 오류: {e}")
+
+        self.load_tasks_thread()
+
+
+    def refresh_todo_dashboard(self):
+        if self.is_loading_tasks: return
+
+        print("투두리스트 새로고침 요청 수신됨.")
+        self.todo_dashboard.show_message("🔄 할 일 목록을 새로고침하는 중...")
+        
+        self.is_loading_tasks = True
+        threading.Thread(target=self.sync_cache_and_reload_tasks, daemon=True).start()

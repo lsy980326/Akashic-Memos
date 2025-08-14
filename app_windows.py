@@ -5,7 +5,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QLineEdit, QHBoxLayout,
                              QHeaderView, QMessageBox, QMenu, QStatusBar, QLabel,
                              QFormLayout, QCheckBox, QSplitter, QListWidget,
                              QListWidgetItem, QTreeWidget, QTreeWidgetItem, QFrame,
-                             QFileDialog, QToolBar, QAction, QSizePolicy)
+                             QFileDialog, QToolBar, QAction, QSizePolicy,QScrollArea)
 from PyQt5.QtGui import QDesktopServices, QFont, QTextCursor
 from core import config_manager
 import qtawesome as qta
@@ -261,12 +261,14 @@ class RichMemoViewWindow(QWidget):
 class MarkdownEditorWindow(QWidget):
     def __init__(self):
         super().__init__()
+        self.window_name = "MarkdownEditorWindow"
         self.current_doc_id = None
         self.initUI()
         self.preview_timer = QTimer(self)
         self.preview_timer.setSingleShot(True)
         self.autosave_timer = QTimer(self)
         self.autosave_timer.setSingleShot(True)
+
     def initUI(self):
         self.setWindowTitle('새 메모 작성'); self.setGeometry(150, 150, 1200, 800)
         main_layout = QVBoxLayout(); main_layout.setContentsMargins(10, 10, 10, 10); main_layout.setSpacing(10)
@@ -308,8 +310,9 @@ class MarkdownEditorWindow(QWidget):
 
         bottom_layout = QHBoxLayout()
         self.auto_save_status_label = QLabel("모든 변경사항이 저장됨")
-        self.auto_save_status_label.setStyleSheet("color: #6c757d;")
         self.auto_save_status_label.setAlignment(Qt.AlignLeft)
+        self.auto_save_status_label.setStyleSheet("color: #6c757d; padding-top: 5px;") # 위쪽 여백 추가
+        self.auto_save_status_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum) 
 
         tag_layout.addWidget(tag_label);
         tag_layout.addWidget(self.tag_input);
@@ -359,7 +362,12 @@ class MarkdownEditorWindow(QWidget):
             markdown_link = f"[{os.path.basename(file_name)}](resources/files/{os.path.basename(file_name)})"
             self.editor.insertPlainText(markdown_link)
 
-    def closeEvent(self, event): self.clear_fields(); self.hide(); event.ignore()
+    def closeEvent(self, event):
+        geometry_hex = self.saveGeometry().toHex().data().decode('utf-8')
+        config_manager.save_window_state(self.window_name, geometry_hex)
+        self.clear_fields()
+        self.hide()
+        event.ignore()
 
     def update_auto_save_status(self, status: str):
         if status == "모든 변경사항이 저장됨":
@@ -385,6 +393,7 @@ class MemoListWindow(QWidget):
 
     def __init__(self):
         super().__init__();
+        self.window_name = "MemoListWindow"
         self.initUI()
 
     def initUI(self):
@@ -406,7 +415,7 @@ class MemoListWindow(QWidget):
         # --- 왼쪽 패널 (네비게이션 트리용) ---
         left_panel = QFrame()
         left_layout = QVBoxLayout(left_panel)
-        left_panel.setMaximumWidth(200)
+        # left_panel.setMaximumWidth(200)
 
         # --- 오른쪽 패널 (메인 콘텐츠용) ---
         right_panel = QFrame()
@@ -579,8 +588,11 @@ class MemoListWindow(QWidget):
             if doc_id:
                 self.favorite_toggled_from_list.emit(doc_id)
 
-    def closeEvent(self, event): event.ignore(); self.hide()
-
+    def closeEvent(self, event):
+        geometry_hex = self.saveGeometry().toHex().data().decode('utf-8')
+        config_manager.save_window_state(self.window_name, geometry_hex)
+        event.ignore()
+        self.hide()
 
 class SettingsWindow(QWidget):
     def __init__(self):
@@ -617,3 +629,236 @@ class SettingsWindow(QWidget):
         fname, _ = QFileDialog.getOpenFileName(self, '사용자 CSS 파일 선택', '', 'CSS Files (*.css)');
         if fname: self.css_path_edit.setText(fname)
     def closeEvent(self, event): self.hide()
+
+
+class SourceMemoWidget(QFrame):
+    def __init__(self, text, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(5)
+
+        self.setObjectName("SourceMemoWidget")
+        self.setStyleSheet("""
+            #SourceMemoWidget {
+                background-color: #f1f3f5;
+                border-radius: 10px;
+                border: 1px solid #e9ecef;
+            }
+        """)
+
+        icon = QLabel()
+        icon.setPixmap(qta.icon('fa5s.rocket', color='#4c6ef5').pixmap(QSize(12, 12)))
+        self.label = QLabel(text)
+        self.label.setStyleSheet("color: #495057; background-color: transparent; border: none;")
+
+        layout.addWidget(icon)
+        layout.addWidget(self.label)
+    
+    def set_checked_state(self, is_checked):
+        if is_checked:
+            self.label.setStyleSheet("color: #adb5bd; background-color: transparent; border: none; text-decoration: line-through;")
+            self.setStyleSheet("""
+                #SourceMemoWidget {
+                    background-color: #f8f9fa;
+                    border-radius: 10px;
+                    border: 1px solid #f1f3f5;
+                }
+            """)
+        else:
+            self.label.setStyleSheet("color: #495057; background-color: transparent; border: none;")
+            self.setStyleSheet("""
+                #SourceMemoWidget {
+                    background-color: #f1f3f5;
+                    border-radius: 10px;
+                    border: 1px solid #e9ecef;
+                }
+            """)
+
+
+class TodoItemWidget(QFrame):
+    toggled = pyqtSignal(bool)
+
+    def __init__(self, text, source_memo, is_checked, parent=None):
+        super().__init__(parent)
+        self.setObjectName("TodoItemFrame")
+        
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(12)
+
+        self.checkbox = QCheckBox()
+        self.checkbox.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+        self.text_label = QLabel(text)
+        self.text_label.setWordWrap(True)
+        self.text_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.text_label.setFont(QFont("Segoe UI", 10))
+
+        self.source_widget = SourceMemoWidget(source_memo)
+        self.source_widget.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        
+        layout.addWidget(self.checkbox)
+        layout.addWidget(self.text_label, 1)
+        layout.addWidget(self.source_widget)
+
+        self.checkbox.toggled.connect(self.toggled.emit)
+        
+        self.set_checked_state(is_checked)
+
+    def set_checked_state(self, is_checked):
+        self.checkbox.blockSignals(True)
+        self.checkbox.setChecked(is_checked)
+        self.checkbox.blockSignals(False)
+
+        font = self.text_label.font()
+        font.setStrikeOut(is_checked)
+        self.text_label.setFont(font)
+        
+        if is_checked:
+            self.text_label.setStyleSheet("color: #adb5bd;")
+            self.setObjectName("TodoItemFrameChecked")
+            self.setStyleSheet("""
+                #TodoItemFrameChecked {
+                    background-color: #f8f9fa;
+                    border: 1px solid #f1f3f5;
+                    border-radius: 8px;
+                }
+            """)
+        else:
+            self.text_label.setStyleSheet("color: #212529;")
+            self.setObjectName("TodoItemFrame")
+            self.setStyleSheet("""
+                #TodoItemFrame {
+                    background-color: #ffffff;
+                    border: 1px solid #dee2e6;
+                    border-radius: 8px;
+                }
+            """)
+
+        self.source_widget.set_checked_state(is_checked)
+
+
+class TodoDashboardWindow(QWidget):
+    task_toggled = pyqtSignal(dict, bool)
+    item_clicked = pyqtSignal(str)
+    refresh_requested = pyqtSignal()
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.initUI()
+        self.offset = None # 창 이동을 위한 변수
+        
+    def initUI(self):
+        self.setFixedSize(500, 600)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(5, 5, 5, 5)
+        self.setStyleSheet("""
+            background-color: #f8f9fa; 
+            border: 1px solid #dee2e6; 
+            border-radius: 8px;
+        """)
+
+        # --- 상단 바 (제목 및 닫기 버튼) ---
+        top_bar = QFrame() # 드래그 이벤트를 처리할 상단 바 프레임
+        top_bar.setObjectName("TopBar")
+        top_bar_layout = QHBoxLayout(top_bar)
+        top_bar_layout.setContentsMargins(10, 5, 5, 5)
+        title_label = QLabel("<b>오늘 할 일</b>")
+        
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        refresh_button = QPushButton(qta.icon('fa5s.sync-alt', color='#888'), "")
+        refresh_button.setFlat(True)
+        refresh_button.setStyleSheet("QPushButton { border: none; }")
+        refresh_button.setToolTip("목록 새로고침")
+        refresh_button.clicked.connect(self.refresh_requested.emit)
+        
+        close_button = QPushButton(qta.icon('fa5s.times', color='#888'), "")
+        close_button.setFlat(True) # 버튼 배경을 투명하게
+        close_button.setStyleSheet("QPushButton { border: none; }")
+        close_button.clicked.connect(self.hide)
+        
+        top_bar_layout.addWidget(title_label)
+        top_bar_layout.addWidget(spacer)
+        top_bar_layout.addWidget(refresh_button)
+        top_bar_layout.addWidget(close_button)
+        main_layout.addWidget(top_bar)
+        
+        # --- 스크롤 영역 ---
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setStyleSheet("QScrollArea { border: none; }") 
+        
+        container = QWidget()
+        self.content_layout = QVBoxLayout(container)
+        self.content_layout.setAlignment(Qt.AlignTop)
+        self.content_layout.setSpacing(4)
+        
+        scroll_area.setWidget(container)
+        main_layout.addWidget(scroll_area)
+        self.setLayout(main_layout) 
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.hide()
+
+    def mousePressEvent(self, event):
+        child_widget = self.childAt(event.pos())
+    
+        if event.button() == Qt.LeftButton and child_widget is not None and child_widget.objectName() == "TopBar":
+            self.offset = event.pos()
+        else:
+            # 그 외의 경우는 기본 이벤트를 처리하도록 넘깁니다.
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.offset is not None and event.buttons() == Qt.LeftButton:
+            self.move(self.pos() + event.pos() - self.offset)
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self.offset = None
+        super().mouseReleaseEvent(event)
+
+    def show_message(self, message):
+        self._clear_layout()
+        label = QLabel(message)
+        label.setAlignment(Qt.AlignCenter)
+        self.content_layout.addWidget(label)
+
+    def _clear_layout(self):
+        while self.content_layout.count():
+            item = self.content_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def update_tasks(self, tasks):
+        self._clear_layout()
+        if not tasks:
+            self.show_message("✅ 할 일이 없거나 모두 완료했습니다!")
+        else:
+            for task in tasks:
+                widget = TodoItemWidget(task['line_text'], task['source_memo'], task['is_checked'])
+                widget.checkbox.setProperty("task_info", task)
+                widget.toggled.connect(self.on_task_toggled)
+                
+                # 항목 클릭 시 원본 메모 보기 (소스 버블 제외)
+                widget.mousePressEvent = lambda event, t=task: self.on_item_clicked(event, t)
+                self.content_layout.addWidget(widget)
+
+    def on_task_toggled(self, checked):
+        sender_widget = self.sender()
+        if sender_widget:
+            task_info = sender_widget.checkbox.property("task_info")
+            if task_info:
+                self.task_toggled.emit(task_info, checked)
+    
+    def on_item_clicked(self, event, task):
+        # 소스 위젯을 클릭한 경우는 제외하고, 본문 영역을 클릭했을 때만 반응
+        if not isinstance(self.childAt(event.globalPos()), SourceMemoWidget):
+            self.item_clicked.emit(task['doc_id'])

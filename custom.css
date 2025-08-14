@@ -116,3 +116,48 @@ th {
   background-color: #f7f8f9;
   font-weight: 600;
 }
+
+/* --- 할 일 목록 스타일 --- */
+ul li {
+  list-style-type: none; /* 기본 list-style(점) 제거 */
+}
+
+ul li > .task-checkbox-empty,
+ul li > .task-checkbox-done {
+  display: inline-block;
+  position: relative; /* ::after 요소를 위한 기준점 */
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  margin-right: 12px;
+  vertical-align: -3px;
+}
+
+.task-checkbox-empty {
+  border: 1.5px solid #ced4da;
+  background-color: #ffffff;
+}
+
+.task-checkbox-done {
+  border: 1.5px solid #3498db;
+  background-color: #3498db;
+}
+
+/* ::after 가상 요소를 이용해 V자 체크마크 생성 */
+.task-checkbox-done::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: solid white;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+/* 완료된 항목 텍스트에 취소선 추가 */
+ul li > .task-checkbox-done ~ * {
+  text-decoration: line-through;
+  color: #adb5bd;
+}

@@ -90,11 +90,17 @@ QMenu {
     padding: 5px;
 }
 QMenu::item {
-    padding: 5px 20px;
+    padding: 8px 24px; /* 패딩 증가 */
     border-radius: 4px;
 }
 QMenu::item:selected {
     background-color: #e9ecef;
+    color: #212529;
+}
+QMenu::separator {
+    height: 1px;
+    background-color: #e9ecef; /* 구분선 색상 */
+    margin: 5px 0px; /* 위아래 여백 */
 }
 
 /* === 뷰어 툴바 === */

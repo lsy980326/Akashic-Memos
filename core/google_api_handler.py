@@ -319,3 +319,66 @@ def delete_memo(doc_id, row_index=None):
     except Exception as e:
         print(f"메모 삭제 중 오류 발생: {e}")
         return False
+    
+def update_checklist_item(doc_id, original_line, is_checked):
+    docs_service, _, _ = get_services()
+    try:
+        doc = docs_service.documents().get(documentId=doc_id, fields='body').execute()
+        body_content = doc.get('body').get('content')
+
+        target_line_to_find = original_line.strip()
+        new_line_prefix = "- [x] " if is_checked else "- [ ] "
+        old_line_prefix = "- [ ] " if is_checked else "- [x] "
+        
+        requests = []
+        found_and_updated = False
+
+        for element in body_content:
+            if 'paragraph' in element:
+                for pe in element.get('paragraph').get('elements', []):
+                    if 'textRun' in pe:
+                        text_run_content = pe.get('textRun').get('content', '')
+                        
+                        # textRun 안에 목표 라인이 정확히 있는지 확인
+                        if target_line_to_find in text_run_content:
+                            # textRun 내에서 실제 줄의 시작 위치를 찾음
+                            line_start_in_textrun = text_run_content.find(target_line_to_find)
+                            
+                            # 문서 전체에서 삭제할 체크박스의 시작 위치를 계산
+                            # pe['startIndex']는 textRun의 시작 위치
+                            delete_start_index = pe['startIndex'] + line_start_in_textrun
+                            
+                            # 요청 생성
+                            requests = [
+                                {
+                                    'deleteContentRange': {
+                                        'range': {
+                                            'startIndex': delete_start_index,
+                                            'endIndex': delete_start_index + len(old_line_prefix)
+                                        }
+                                    }
+                                },
+                                {
+                                    'insertText': {
+                                        'location': {'index': delete_start_index},
+                                        'text': new_line_prefix
+                                    }
+                                }
+                            ]
+                            
+                            found_and_updated = True
+                            break # 정확한 위치를 찾았으므로 내부 루프 종료
+                if found_and_updated:
+                    break # 외부 루프도 종료
+
+        if not found_and_updated:
+            print(f"오류: 문서 '{doc_id}'에서 원본 줄 '{target_line_to_find}'을(를) 찾을 수 없습니다.")
+            return False
+
+        docs_service.documents().batchUpdate(documentId=doc_id, body={'requests': requests}).execute()
+        print(f"체크리스트 업데이트 성공: '{target_line_to_find}' -> {is_checked}")
+        return True
+
+    except Exception as e:
+        print(f"체크리스트 업데이트 중 오류 발생: {e}")
+        return False

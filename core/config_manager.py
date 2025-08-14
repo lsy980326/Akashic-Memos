@@ -19,7 +19,6 @@ CACHE_FILE = os.path.join(APP_DATA_DIR, 'cache.json') # 목록 캐시
 config = configparser.ConfigParser()
 
 def load_config():
-    """설정 파일을 읽고, 없는 섹션이나 키는 기본값으로."""
     if not os.path.exists(CONFIG_FILE):
         create_default_config()
     
@@ -31,7 +30,8 @@ def load_config():
             'spreadsheet_id': 'YOUR_SPREADSHEET_ID', # 기본값은 비워두거나 예시 ID 사용
             'folder_id': 'YOUR_FOLDER_ID'
         },
-        'Display': {'page_size': '30','custom_css_path': '', 'autosave_interval_ms': '3000'}
+        'Display': {'page_size': '30','custom_css_path': '', 'autosave_interval_ms': '3000'},
+        'WindowStates': {}
     }
     
     changes_made = False
@@ -126,3 +126,14 @@ def remove_favorite(doc_id):
     if doc_id in favs:
         favs.remove(doc_id)
         set_favorites(favs)
+
+
+def save_window_state(window_name, geometry_hex):
+    if not config.has_section('WindowStates'):
+        config.add_section('WindowStates')
+    config.set('WindowStates', window_name, geometry_hex)
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as configfile:
+        config.write(configfile)
+
+def get_window_state(window_name):
+    return config.get('WindowStates', window_name, fallback=None)
