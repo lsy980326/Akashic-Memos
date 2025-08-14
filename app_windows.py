@@ -1,4 +1,5 @@
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QUrl, QSize
+from datetime import datetime
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QLineEdit, QHBoxLayout,
                              QTextEdit, QPushButton, QTableWidget, QTableWidgetItem,
@@ -643,7 +644,7 @@ class SourceMemoWidget(QFrame):
             #SourceMemoWidget {
                 background-color: #f1f3f5;
                 border-radius: 10px;
-                border: 1px solid #e9ecef;
+                border: none;
             }
         """)
 
@@ -662,7 +663,7 @@ class SourceMemoWidget(QFrame):
                 #SourceMemoWidget {
                     background-color: #f8f9fa;
                     border-radius: 10px;
-                    border: 1px solid #f1f3f5;
+                    border: none;
                 }
             """)
         else:
@@ -671,7 +672,7 @@ class SourceMemoWidget(QFrame):
                 #SourceMemoWidget {
                     background-color: #f1f3f5;
                     border-radius: 10px;
-                    border: 1px solid #e9ecef;
+                    border: none;
                 }
             """)
 
@@ -679,7 +680,7 @@ class SourceMemoWidget(QFrame):
 class TodoItemWidget(QFrame):
     toggled = pyqtSignal(bool)
 
-    def __init__(self, text, source_memo, is_checked, parent=None):
+    def __init__(self, text, source_memo, is_checked, deadline, priority, parent=None):
         super().__init__(parent)
         self.setObjectName("TodoItemFrame")
         
@@ -695,15 +696,50 @@ class TodoItemWidget(QFrame):
         self.text_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.text_label.setFont(QFont("Segoe UI", 10))
 
-        self.source_widget = SourceMemoWidget(source_memo)
-        self.source_widget.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
-        
         layout.addWidget(self.checkbox)
         layout.addWidget(self.text_label, 1)
-        layout.addWidget(self.source_widget)
 
+        # 우선순위 표시
+        if priority:
+            priority_colors = {1: '#e03131', 2: '#f08c00', 3: '#2f9e44', 4: '#1971c2', 5: '#868e96'}
+            color = priority_colors.get(priority, '#868e96')
+            priority_label = QLabel()
+            priority_label.setPixmap(qta.icon('fa5s.flag', color=color).pixmap(QSize(14, 14)))
+            priority_label.setToolTip(f"우선순위: {priority}")
+            layout.addWidget(priority_label)
+
+        # 마감일 표시
+        if deadline:
+            deadline_icon_label = QLabel()
+            deadline_text_label = QLabel(deadline.split(' ')[0]) # 날짜 부분만 표시
+            
+            is_overdue = False
+            try:
+                deadline_format = "%Y-%m-%d %H:%M" if ':' in deadline else "%Y-%m-%d"
+                deadline_dt = datetime.strptime(deadline, deadline_format)
+                if not is_checked and deadline_dt < datetime.now():
+                    is_overdue = True
+            except (ValueError, TypeError):
+                pass
+            
+            # 마감일이 지났을 때 더 눈에 띄는 빨간색으로 변경
+            color = "#e03131" if is_overdue else "#495057"
+            icon = qta.icon('fa5s.calendar-alt', color=color)
+            
+            deadline_icon_label.setPixmap(icon.pixmap(QSize(14, 14)))
+            deadline_text_label.setStyleSheet(f"color: {color}; background: transparent;")
+            
+            # 툴팁 추가
+            deadline_icon_label.setToolTip(f"마감일: {deadline}")
+            deadline_text_label.setToolTip(f"마감일: {deadline}")
+
+            layout.addWidget(deadline_icon_label)
+            layout.addWidget(deadline_text_label)
+
+
+        self.source_widget = SourceMemoWidget(source_memo)
+        layout.addWidget(self.source_widget, 1)
         self.checkbox.toggled.connect(self.toggled.emit)
-        
         self.set_checked_state(is_checked)
 
     def set_checked_state(self, is_checked):
@@ -721,7 +757,7 @@ class TodoItemWidget(QFrame):
             self.setStyleSheet("""
                 #TodoItemFrameChecked {
                     background-color: #f8f9fa;
-                    border: 1px solid #f1f3f5;
+                    border: none;
                     border-radius: 8px;
                 }
             """)
@@ -731,7 +767,7 @@ class TodoItemWidget(QFrame):
             self.setStyleSheet("""
                 #TodoItemFrame {
                     background-color: #ffffff;
-                    border: 1px solid #dee2e6;
+                    border: none;
                     border-radius: 8px;
                 }
             """)
@@ -743,6 +779,7 @@ class TodoDashboardWindow(QWidget):
     task_toggled = pyqtSignal(dict, bool)
     item_clicked = pyqtSignal(str)
     refresh_requested = pyqtSignal()
+    completion_filter_changed = pyqtSignal(bool)
 
     def __init__(self):
         super().__init__()
@@ -765,7 +802,13 @@ class TodoDashboardWindow(QWidget):
         top_bar.setObjectName("TopBar")
         top_bar_layout = QHBoxLayout(top_bar)
         top_bar_layout.setContentsMargins(10, 5, 5, 5)
+        top_bar_layout.setSpacing(10)
         title_label = QLabel("<b>오늘 할 일</b>")
+
+        self.show_completed_checkbox = QCheckBox("완료 항목 표시")
+        self.show_completed_checkbox.setStyleSheet("color: #495057; spacing: 5px;")
+        self.show_completed_checkbox.toggled.connect(self.completion_filter_changed.emit)
+
         
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -782,6 +825,7 @@ class TodoDashboardWindow(QWidget):
         close_button.clicked.connect(self.hide)
         
         top_bar_layout.addWidget(title_label)
+        top_bar_layout.addWidget(self.show_completed_checkbox)
         top_bar_layout.addWidget(spacer)
         top_bar_layout.addWidget(refresh_button)
         top_bar_layout.addWidget(close_button)
@@ -843,7 +887,13 @@ class TodoDashboardWindow(QWidget):
             self.show_message("✅ 할 일이 없거나 모두 완료했습니다!")
         else:
             for task in tasks:
-                widget = TodoItemWidget(task['line_text'], task['source_memo'], task['is_checked'])
+                widget = TodoItemWidget(
+                    task['line_text'], 
+                    task['source_memo'], 
+                    task['is_checked'],
+                    task['deadline'],
+                    task['priority']
+                )
                 widget.checkbox.setProperty("task_info", task)
                 widget.toggled.connect(self.on_task_toggled)
                 
@@ -862,3 +912,148 @@ class TodoDashboardWindow(QWidget):
         # 소스 위젯을 클릭한 경우는 제외하고, 본문 영역을 클릭했을 때만 반응
         if not isinstance(self.childAt(event.globalPos()), SourceMemoWidget):
             self.item_clicked.emit(task['doc_id'])
+
+
+class CustomNotificationWindow(QWidget):
+    view_memo_requested = pyqtSignal(str) # '메모 보기' 클릭 시 doc_id를 전달할 신호
+    notification_closed = pyqtSignal() # 알림 창이 닫힐 때 발생하는 신호
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.doc_id = None
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground) # 투명 배경 허용
+        self.initUI()
+        
+    def initUI(self):
+        self.setFixedSize(380, 150)
+
+        # 전체 레이아웃
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+
+        # 배경 및 테두리 역할을 할 프레임
+        bg_frame = QFrame(self)
+        bg_frame.setObjectName("NotificationFrame")
+        bg_frame.setStyleSheet("""
+            #NotificationFrame {
+                background-color: #ffffff;
+                border: 1px solid #dee2e6;
+                border-radius: 8px;
+            }
+        """)
+        
+        frame_layout = QVBoxLayout(bg_frame)
+        frame_layout.setContentsMargins(15, 10, 15, 10)
+        frame_layout.setSpacing(8)
+        main_layout.addWidget(bg_frame)
+
+        # 1. 제목 영역
+        title_layout = QHBoxLayout()
+        icon_label = QLabel()
+        icon_label.setPixmap(qta.icon('fa5s.clock', color='#1971c2').pixmap(QSize(16, 16)))
+        self.title_label = QLabel("<b>마감일 알림</b>")
+        self.title_label.setStyleSheet("font-size: 11pt; background: transparent; border: none;")
+        title_layout.addWidget(icon_label)
+        title_layout.addWidget(self.title_label)
+        title_layout.addStretch()
+        
+        # 2. 내용 영역
+        self.message_label = QLabel("여기에 알림 내용이 표시됩니다.")
+        self.message_label.setWordWrap(True)
+        self.message_label.setStyleSheet("background: transparent; border: none;")
+
+        # 3. 버튼 영역
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        
+        view_button = QPushButton("메모 보기")
+        view_button.clicked.connect(self.view_memo)
+        
+        dismiss_button = QPushButton("확인")
+        dismiss_button.setObjectName("PagingButton") # 다른 스타일 적용
+        dismiss_button.clicked.connect(self.hide)
+
+        button_layout.addWidget(view_button)
+        button_layout.addWidget(dismiss_button)
+
+        frame_layout.addLayout(title_layout)
+        frame_layout.addWidget(self.message_label)
+        frame_layout.addStretch()
+        frame_layout.addLayout(button_layout)
+
+    def set_notification_data(self, title, message, doc_id):
+        self.title_label.setText(f"<b>{title}</b>")
+        self.message_label.setText(message)
+        self.doc_id = doc_id
+
+    def view_memo(self):
+        if self.doc_id:
+            self.view_memo_requested.emit(self.doc_id)
+        self.hide()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self.notification_closed.emit()
+
+class ToastNotificationWindow(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setFixedSize(350, 80)
+
+        self.bg_frame = QFrame(self)
+        self.bg_frame.setObjectName("ToastFrame")
+        self.bg_frame.setStyleSheet("""
+            #ToastFrame {
+                /* 전체 테마와 일관성을 위한 약간 밝은 회색 배경 */
+                background-color: #f8f9fa; 
+                /* 흰색 배경 위에 떴을 때를 대비한 미세한 테두리 */
+                border: 1px solid #e9ecef; 
+                /* 다른 위젯보다 약간 부드러운 느낌을 주는 6px 곡률 */
+                border-radius: 6px; 
+            }
+            #ToastFrame QLabel {
+                /* 테마의 기본 텍스트 색상으로 가독성 확보 */
+                color: #212529; 
+                font-size: 10pt;
+                font-weight: 500; /* 살짝 두께감 추가 */
+                background-color: transparent;
+                border: none;
+                /* 텍스트가 답답하지 않도록 내부 여백 설정 */
+                padding: 8px 15px;
+            }
+        """)
+        
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(self.bg_frame)
+
+        frame_layout = QHBoxLayout(self.bg_frame)
+        frame_layout.setContentsMargins(15, 10, 15, 10)
+
+        self.icon_label = QLabel()
+        self.message_label = QLabel()
+        
+        frame_layout.addWidget(self.icon_label)
+        frame_layout.addWidget(self.message_label)
+        frame_layout.addStretch()
+
+        self.hide_timer = QTimer(self)
+        self.hide_timer.setSingleShot(True)
+        self.hide_timer.timeout.connect(self.hide)
+
+    def show_toast(self, title, message):
+        self.message_label.setText(f"<b>{title}</b><br>{message}")
+        # Simple icon logic based on title
+        if "완료" in title or "성공" in title:
+            icon = qta.icon('fa5s.check-circle', color='#28a745') # Green
+        elif "오류" in title or "실패" in title:
+            icon = qta.icon('fa5s.exclamation-circle', color='#dc3545') # Red
+        else:
+            icon = qta.icon('fa5s.info-circle', color='#17a2b8') # Blue
+        self.icon_label.setPixmap(icon.pixmap(QSize(24, 24)))
+        
+        self.show()
+        self.hide_timer.start(3000) # Hide after 3 seconds

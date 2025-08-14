@@ -17,8 +17,9 @@ from pystray import Icon as pystray_icon, Menu as pystray_menu, MenuItem as pyst
 from PIL import Image
 from core import google_api_handler, config_manager
 from core.utils import resource_path
-from app_windows import MarkdownEditorWindow, MemoListWindow, SettingsWindow, RichMemoViewWindow, QuickLauncherWindow, TodoDashboardWindow, TodoItemWidget
+from app_windows import MarkdownEditorWindow, MemoListWindow, SettingsWindow, RichMemoViewWindow, QuickLauncherWindow, TodoDashboardWindow, TodoItemWidget, CustomNotificationWindow, ToastNotificationWindow
 import qtawesome as qta
+from datetime import datetime, time
 
 class SignalEmitter(QObject):
     show_new_memo = pyqtSignal()
@@ -30,7 +31,8 @@ class SignalEmitter(QObject):
     list_data_loaded = pyqtSignal(list, bool)
     nav_tree_updated = pyqtSignal(set, list)
     status_update = pyqtSignal(str, int)
-    notification = pyqtSignal(str, str)
+    persistent_notification = pyqtSignal(str, str, str)  # For persistent notifications like deadlines
+    toast_notification = pyqtSignal(str, str)  # For temporary notifications like save/update
     favorite_status_changed = pyqtSignal(str, bool)
     auto_save_status_update = pyqtSignal(str)
     todo_list_updated = pyqtSignal(list)
@@ -61,6 +63,11 @@ class AppController:
         self.quick_launcher = QuickLauncherWindow()
         self.quick_launcher.setWindowIcon(app_icon)
         self.todo_dashboard = TodoDashboardWindow()
+        self.notification_window = CustomNotificationWindow()
+        self.toast_notification_window = ToastNotificationWindow()
+
+        self.notification_queue = []
+        self.is_notification_active = False
 
         self.local_cache = []
         self.all_tags = set()
@@ -77,6 +84,11 @@ class AppController:
         self.is_loading_tasks = False
         self.cache_lock = threading.Lock()
 
+        self.all_tasks = []
+        self.show_completed_tasks = False
+        self.notified_tasks = config_manager.load_notified_tasks()
+        self.notification_timer = QTimer()
+
         self.auto_save_timer = QTimer()
         self.auto_save_timer.setSingleShot(True)
         self.auto_save_interval_ms = 3000
@@ -85,6 +97,8 @@ class AppController:
         self.load_cache_only(initial_load=True)
         self.setup_hotkeys()
         self.setup_tray_icon()
+
+        self.notification_timer.start(60000) 
         QTimer.singleShot(2000, self.start_initial_sync)
 
         self.favorites = []
@@ -101,14 +115,18 @@ class AppController:
         self.emitter.show_edit_memo.connect(self.open_editor_with_content, Qt.QueuedConnection)
         self.emitter.show_rich_view.connect(self.rich_viewer.set_content, Qt.QueuedConnection)
         self.emitter.status_update.connect(self.memo_list.statusBar.showMessage, Qt.QueuedConnection)
-        self.emitter.notification.connect(self.show_notification, Qt.QueuedConnection)
+        self.emitter.persistent_notification.connect(self.show_persistent_notification)
+        self.emitter.toast_notification.connect(self.show_toast_notification)
+        self.notification_window.view_memo_requested.connect(self.view_memo_from_notification)
+        self.notification_window.notification_closed.connect(self.on_notification_closed)
         self.emitter.sync_finished_update_list.connect(self.on_sync_finished_update_list, Qt.QueuedConnection)
         self.emitter.todo_list_updated.connect(self.todo_dashboard.update_tasks, Qt.QueuedConnection)
         self.emitter.tasks_data_loaded.connect(self.process_loaded_tasks, Qt.QueuedConnection)
         self.emitter.toggle_todo_dashboard_signal.connect(self.toggle_todo_dashboard, Qt.QueuedConnection)
 
+        self.todo_dashboard.completion_filter_changed.connect(self.on_completion_filter_changed)
+        self.notification_timer.timeout.connect(self.check_task_deadlines)
         self.search_timer.timeout.connect(self.perform_search)
-        
         self.todo_dashboard.task_toggled.connect(self.on_task_toggled)
         self.todo_dashboard.item_clicked.connect(self.view_memo_by_id)
         self.todo_dashboard.refresh_requested.connect(self.refresh_todo_dashboard)
@@ -446,7 +464,7 @@ class AppController:
         if success:
             self.emitter.auto_save_status_update.emit("모든 변경사항이 저장됨")
             if not is_auto_save:
-                self.emitter.notification.emit("저장 완료", f"'{title}' 메모가 저장되었습니다.")
+                self.emitter.toast_notification.emit("저장 완료", f"'{title}' 메모가 저장되었습니다.")
             
             # 새 문서 ID를 에디터에 설정 (자동 저장 후 수동 저장 시 업데이트를 위함)
             if self.memo_editor.isVisible() and not self.memo_editor.current_doc_id:
@@ -488,7 +506,7 @@ class AppController:
                 os.remove(cache_path_html)
             
             if not is_auto_save:
-                self.emitter.notification.emit("업데이트 완료", f"'{title}' 메모가 업데이트되었습니다.")
+                self.emitter.toast_notification.emit("업데이트 완료", f"'{title}' 메모가 업데이트되었습니다.")
 
             # 로컬 캐시 직접 업데이트
             current_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -665,8 +683,10 @@ class AppController:
             self.emitter.nav_tree_updated.emit(self.all_tags, self.local_cache)
             self.on_navigation_selected("전체 메모") # 전체 메모 목록으로 돌아가기
             self.emitter.status_update.emit("삭제 완료", 5000)
+            self.emitter.toast_notification.emit("삭제 완료", f"메모가 삭제되었습니다.")
         else:
             self.emitter.status_update.emit("삭제 실패", 5000)
+            self.emitter.toast_notification.emit("삭제 실패", f"메모 삭제에 실패했습니다.")
 
     def show_context_menu(self, pos):
         item = self.memo_list.table.itemAt(pos)
@@ -718,9 +738,13 @@ class AppController:
         keyboard.unhook_all()
         self.setup_hotkeys()
 
-    def show_notification(self, title, message):
-        if self.icon and self.icon.visible:
-            self.icon.notify(message, title)
+    def show_toast_notification(self, title, message):
+        screen_geometry = QApplication.primaryScreen().availableGeometry()
+        win_size = self.toast_notification_window.size()
+        x = screen_geometry.width() - win_size.width() - 15
+        y = screen_geometry.height() - win_size.height() - 15
+        self.toast_notification_window.move(x, y)
+        self.toast_notification_window.show_toast(title, message)
     
     def update_editor_preview(self):
         markdown_text = self.memo_editor.editor.toPlainText()
@@ -941,6 +965,11 @@ class AppController:
     
     def process_loaded_tasks(self, contents):
         tasks = []
+        # 마감일 패턴: @YYYY-MM-DD 또는 @YYYY-MM-DD HH:MM
+        deadline_pattern = re.compile(r'@(\d{4}-\d{2}-\d{2}(?:\s\d{2}:\d{2})?)')
+        # 우선순위 패턴: !p1, !p2, !p3 등
+        priority_pattern = re.compile(r'!p([1-5])')
+
         for doc_id, data in contents.items():
             content = data['content']
             source_memo = data['source_memo']
@@ -949,16 +978,34 @@ class AppController:
                 if stripped_line.startswith(("- [ ] ", "- [x] ")):
                     is_checked = stripped_line.startswith("- [x] ")
                     task_text = stripped_line[5:].strip()
+
+                    deadline_str = None
+                    priority_val = None
+                    
+                    # 마감일 찾기
+                    deadline_match = deadline_pattern.search(task_text)
+                    if deadline_match:
+                        deadline_str = deadline_match.group(1)
+                        task_text = task_text.replace(deadline_match.group(0), '').strip()
+                    
+                    # 우선순위 찾기
+                    priority_match = priority_pattern.search(task_text)
+                    if priority_match:
+                        priority_val = int(priority_match.group(1))
+                        task_text = task_text.replace(priority_match.group(0), '').strip()
+
                     tasks.append({
                         'doc_id': doc_id,
-                        'line_text': task_text,
+                        'line_text': task_text,          # 순수 할 일 텍스트
                         'original_line': stripped_line,
                         'source_memo': source_memo,
-                        'is_checked': is_checked
+                        'is_checked': is_checked,
+                        'deadline': deadline_str,    # @ 파싱 결과 (문자열)
+                        'priority': priority_val,    # !p 파싱 결과 (숫자)
                     })
         
-        tasks.sort(key=lambda x: x['is_checked'])
-        self.emitter.todo_list_updated.emit(tasks)
+        self.all_tasks = tasks
+        self.apply_task_filter_and_update_ui()
 
     def toggle_todo_dashboard(self):
         if self.is_loading_tasks: return
@@ -978,10 +1025,12 @@ class AppController:
             threading.Thread(target=self.load_tasks_thread, daemon=True).start()
 
     def on_task_toggled(self, task_info, is_checked):
-        for i in range(self.todo_dashboard.content_layout.count()):
-            widget = self.todo_dashboard.content_layout.itemAt(i).widget()
-            if isinstance(widget, TodoItemWidget) and widget.checkbox.property("task_info") == task_info:
-                widget.set_checked_state(is_checked); break
+        for task in self.all_tasks:
+            if task['original_line'] == task_info['original_line'] and task['doc_id'] == task_info['doc_id']:
+                task['is_checked'] = is_checked
+                break
+
+        self.apply_task_filter_and_update_ui()
         
         # 백그라운드에서 실제 파일 업데이트
         threading.Thread(target=self.update_task_thread, args=(task_info, is_checked), daemon=True).start()
@@ -1046,26 +1095,31 @@ class AppController:
         new_data = google_api_handler.load_memo_list()
         if new_data is not None:
             with self.cache_lock:
+                # 변경된 문서를 확인하기 위해 이전 캐시의 문서 ID와 날짜를 맵으로 저장
+                old_dates = {row[2]: row[1] for row in self.local_cache if len(row) > 2}
                 self.local_cache = new_data
-                self.update_tags_from_cache()
                 try:
                     with open(config_manager.CACHE_FILE, 'w', encoding='utf-8') as f:
                         json.dump(self.local_cache, f, ensure_ascii=False, indent=4)
                     print("메인 캐시 동기화 완료.")
-                except IOError:
-                    pass
-        
-        # 콘텐츠 캐시(.txt) 제거
-        print("콘텐츠 캐시 비우는 중...")
-        cache_dir = config_manager.CONTENT_CACHE_DIR
-        try:
-            for filename in os.listdir(cache_dir):
-                if filename.endswith(".txt"):
-                    os.remove(os.path.join(cache_dir, filename))
-            print("콘텐츠 캐시 비우기 완료.")
-        except Exception as e:
-            print(f"캐시 비우기 중 오류: {e}")
+                except IOError as e:
+                    print(f"메인 캐시 저장 오류: {e}")
 
+                # 새 목록과 이전 날짜를 비교하여 변경된 문서의 콘텐츠 캐시만 삭제
+                for memo in self.local_cache:
+                    if len(memo) > 2:
+                        doc_id = memo[2]
+                        new_date = memo[1]
+                        if doc_id not in old_dates or old_dates[doc_id] != new_date:
+                            cache_path = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.txt")
+                            if os.path.exists(cache_path):
+                                try:
+                                    os.remove(cache_path)
+                                    print(f"콘텐츠 캐시 무효화 (업데이트됨): {doc_id}")
+                                except OSError as e:
+                                    print(f"콘텐츠 캐시 파일 삭제 오류: {e}")
+        
+        # 최적화된 로드 스레드 시작
         self.load_tasks_thread()
 
 
@@ -1077,3 +1131,107 @@ class AppController:
         
         self.is_loading_tasks = True
         threading.Thread(target=self.sync_cache_and_reload_tasks, daemon=True).start()
+
+    def on_completion_filter_changed(self, show_completed):
+        self.show_completed_tasks = show_completed
+        self.apply_task_filter_and_update_ui()
+
+    def apply_task_filter_and_update_ui(self):
+        if self.show_completed_tasks:
+            tasks_to_show = self.all_tasks
+        else:
+            tasks_to_show = [task for task in self.all_tasks if not task['is_checked']]
+
+        # ★★★ 정렬 로직 추가 ★★★
+        def sort_key(task):
+            # 우선순위, 마감일, 일반 항목 순서로 정렬
+            priority = task['priority'] if task['priority'] is not None else 99  # 우선순위 없으면 가장 낮게
+            try:
+                # 시간 정보가 있는 경우 (예: 2024-12-25 10:00)
+                if task['deadline'] and ':' in task['deadline']:
+                    deadline_dt = datetime.strptime(task['deadline'], "%Y-%m-%d %H:%M")
+                # 시간 정보가 없는 경우 (예: 2024-12-25)
+                elif task['deadline']:
+                     deadline_dt = datetime.strptime(task['deadline'], "%Y-%m-%d")
+                else:
+                    deadline_dt = datetime.max # 마감일 없으면 가장 늦게
+            except (ValueError, TypeError):
+                deadline_dt = datetime.max # 마감일 형식 오류 또는 None인 경우 가장 늦게
+            
+            return (priority, deadline_dt) # 우선순위 오름차순, 마감일 오름차순
+        
+        tasks_to_show.sort(key=sort_key)
+        self.emitter.todo_list_updated.emit(tasks_to_show)
+
+    def check_task_deadlines(self):
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 마감일 알림 검사 시작...")
+        now = datetime.now()
+        today_str = now.date().isoformat()
+
+        tasks_to_notify = []
+
+        for task in self.all_tasks:
+            if task['is_checked'] or not task['deadline']:
+                continue
+
+            task_id = f"{task['doc_id']}-{task['original_line']}"
+            
+            try:
+                if ':' in task['deadline']:
+                    deadline_dt = datetime.strptime(task['deadline'], "%Y-%m-%d %H:%M")
+                else:
+                    deadline_dt = datetime.strptime(task['deadline'], "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+
+                if deadline_dt <= now:
+                    last_notified_str = self.notified_tasks.get(task_id)
+                    
+                    if last_notified_str is None:
+                        # Never notified before
+                        tasks_to_notify.append(task)
+                        self.notified_tasks[task_id] = today_str
+                    else:
+                        # Notified before, check if it was on a previous day
+                        last_notified_date = datetime.fromisoformat(last_notified_str).date()
+                        if last_notified_date < now.date():
+                            tasks_to_notify.append(task)
+                            self.notified_tasks[task_id] = today_str
+
+            except (ValueError, TypeError) as e:
+                print(f"마감일 파싱 중 오류 (무시됨): {e}")
+                pass
+
+        if tasks_to_notify:
+            for task in tasks_to_notify:
+                title = "마감일 알림 ⏰"
+                message = f"할 일: {task['line_text']}\n출처: {task['source_memo']}"
+                print(f"알림 발생: {message}")
+                self.emitter.persistent_notification.emit(title, message, task['doc_id'])
+            
+            # Save the updated notification history
+            config_manager.save_notified_tasks(self.notified_tasks)
+
+    def view_memo_from_notification(self, doc_id):
+        self.view_memo_by_id(doc_id)
+
+    def show_persistent_notification(self, title, message, doc_id):
+        self.notification_queue.append((title, message, doc_id))
+        self.process_notification_queue()
+
+    def process_notification_queue(self):
+        if not self.is_notification_active and self.notification_queue:
+            self.is_notification_active = True
+            title, message, doc_id = self.notification_queue.pop(0)
+            
+            screen_geometry = QApplication.primaryScreen().availableGeometry()
+            win_size = self.notification_window.size()
+            x = screen_geometry.width() - win_size.width() - 15
+            y = screen_geometry.height() - win_size.height() - 15
+            
+            self.notification_window.move(x, y)
+            self.notification_window.set_notification_data(title, message, doc_id)
+            self.notification_window.show()
+            self.notification_window.activateWindow()
+
+    def on_notification_closed(self):
+        self.is_notification_active = False
+        self.process_notification_queue()

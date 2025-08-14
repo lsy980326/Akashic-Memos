@@ -137,3 +137,33 @@ def save_window_state(window_name, geometry_hex):
 
 def get_window_state(window_name):
     return config.get('WindowStates', window_name, fallback=None)
+
+# ===================================================================
+# Notified Tasks Management
+# ===================================================================
+import json
+
+NOTIFIED_TASKS_FILE = os.path.join(APP_DATA_DIR, 'notified_tasks.json')
+
+def save_notified_tasks(tasks_dict):
+    """Saves the dictionary of notified task IDs and their notification dates to the file."""
+    try:
+        with open(NOTIFIED_TASKS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(tasks_dict, f, indent=4)
+    except IOError as e:
+        print(f"Error saving notified tasks file: {e}")
+
+def load_notified_tasks():
+    """Loads the dictionary of notified task IDs and dates from the file."""
+    if not os.path.exists(NOTIFIED_TASKS_FILE):
+        return {}
+    try:
+        with open(NOTIFIED_TASKS_FILE, 'r', encoding='utf-8') as f:
+            tasks_dict = json.load(f)
+            # Ensure it's a dictionary, for backward compatibility from old set format
+            if isinstance(tasks_dict, list):
+                return {}
+            return tasks_dict
+    except (IOError, json.JSONDecodeError) as e:
+        print(f"Error loading notified tasks file: {e}")
+        return {}
