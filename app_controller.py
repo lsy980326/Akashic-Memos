@@ -165,7 +165,6 @@ class AppController:
         self.auto_save_timer.timeout.connect(lambda: self.save_memo(is_auto_save=True))
         self.emitter.auto_save_status_update.connect(self.memo_editor.update_auto_save_status, Qt.QueuedConnection)
         
-
     def setup_hotkeys(self):
         try:
             hotkey_new = config_manager.get_setting('Hotkeys', 'new_memo')
@@ -786,8 +785,21 @@ class AppController:
             html = re.sub(r'<li>\[x\]', r'<li><span class="task-checkbox-done"></span>', html)
             return html
 
+        def style_priority_tags(html):
+            # !p1, !p2 등을 - [ ] 로 보이게 함
+            html = re.sub(r'!p([1-5])', r'<span class="rank-\1"></span>', html)
+            return html
+        
+        def style_todotime_tags(html):
+            html = re.sub(r'\s(@\S+\s\S*:\S+)', r'<span class="datetime-tag">\1</span>', html)
+            html = re.sub(r'\s(@\S+)', r'<span class="date-tag">\1</span>', html)
+            return html
+
         parsed_body = re.sub(r'\[\[(.*?)\]\]', replace_wiki_links, html_body)
         parsed_body = style_checkboxes(parsed_body)
+        parsed_body = style_priority_tags(parsed_body)
+        parsed_body = style_todotime_tags(parsed_body)
+        
 
         # 태그를 표시하고 클릭 가능하게 만듦
         tags_html = ""

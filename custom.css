@@ -117,47 +117,130 @@ th {
   font-weight: 600;
 }
 
-/* --- 할 일 목록 스타일 --- */
+/* --- 할 일 목록 스타일 (개선) --- */
 ul li {
-  list-style-type: none; /* 기본 list-style(점) 제거 */
+  list-style-type: none;
+  margin-left: -2em; /* 들여쓰기 조정 */
 }
 
 ul li > .task-checkbox-empty,
 ul li > .task-checkbox-done {
   display: inline-block;
-  position: relative; /* ::after 요소를 위한 기준점 */
-  width: 16px;
-  height: 16px;
-  border-radius: 4px;
-  margin-right: 12px;
-  vertical-align: -3px;
+  position: relative;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  margin-right: 10px;
+  vertical-align: -4px;
+  transition: all 0.2s ease-in-out;
 }
 
 .task-checkbox-empty {
-  border: 1.5px solid #ced4da;
+  border: 2px solid #adb5bd;
   background-color: #ffffff;
+}
+.task-checkbox-empty:hover {
+  border-color: #4a89e8;
+  background-color: #f1f3f5;
 }
 
 .task-checkbox-done {
-  border: 1.5px solid #3498db;
-  background-color: #3498db;
+  border: 2px solid #4a89e8;
+  background-color: #4a89e8;
 }
 
-/* ::after 가상 요소를 이용해 V자 체크마크 생성 */
 .task-checkbox-done::after {
   content: "";
   position: absolute;
-  left: 5px;
-  top: 1px;
-  width: 4px;
-  height: 8px;
+  left: 6px;
+  top: 2px;
+  width: 5px;
+  height: 10px;
   border: solid white;
   border-width: 0 2px 2px 0;
   transform: rotate(45deg);
 }
 
-/* 완료된 항목 텍스트에 취소선 추가 */
 ul li > .task-checkbox-done ~ * {
   text-decoration: line-through;
-  color: #adb5bd;
+  color: #868e96;
+  text-decoration-color: #adb5bd;
+}
+
+/* --- 우선순위 태그 스타일 --- */
+.priority-tag {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 15px;
+  color: #fff;
+  font-weight: 600;
+  font-size: 12px;
+  margin: 0 4px;
+  line-height: 1.5;
+  vertical-align: middle;
+  text-align: center;
+}
+
+.priority-1 {
+  background-color: #d73a49;
+} /* Red */
+.priority-2 {
+  background-color: #e67e22;
+} /* Orange */
+.priority-3 {
+  background-color: #28a745;
+} /* Green */
+.priority-4 {
+  background-color: #007bff;
+} /* Blue */
+.priority-5 {
+  background-color: #6a737d;
+} /* Grey */
+
+[class^="rank-"] {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 12px;
+  color: #fff;
+  font-weight: 600;
+  font-size: 13px;
+  margin-right: 8px;
+  line-height: 1.6;
+  vertical-align: middle;
+}
+
+.rank-1 {
+  background-color: #e54d42;
+  color: #ffffff;
+}
+
+.rank-2 {
+  background-color: #f39c12;
+  color: #ffffff;
+}
+
+.rank-3 {
+  background-color: #4a89e8;
+  color: #ffffff;
+}
+
+.rank-4,
+.rank-5 {
+  background-color: #f0f1f2;
+  color: #586069;
+}
+
+/* --- 날짜/시간 태그 공통 스타일 --- */
+.date-tag,
+.datetime-tag {
+  display: inline-flex;
+  align-items: center;
+  background-color: #eef3fc;
+  color: #4a6a9b;
+  padding: 2px 9px 2px 7px;
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.6;
+  vertical-align: middle;
 }
