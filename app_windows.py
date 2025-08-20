@@ -9,6 +9,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QLineEdit, QHBoxLayout,
                              QFileDialog, QToolBar, QAction, QSizePolicy,QScrollArea, QGraphicsDropShadowEffect)
 from PyQt5.QtGui import QDesktopServices, QFont, QTextCursor, QColor
 from core import config_manager
+from core.utils import get_screen_geometry, center_window
 import qtawesome as qta
 import os
 
@@ -33,7 +34,7 @@ class QuickLauncherWindow(QWidget):
     def __init__(self):
         super().__init__(); self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool); self.initUI()
     def initUI(self):
-        self.setFixedSize(600, 300); layout = QVBoxLayout(); layout.setContentsMargins(5, 5, 5, 5)
+        self.resize(600, 300); center_window(self); layout = QVBoxLayout(); layout.setContentsMargins(5, 5, 5, 5)
         self.search_box = QLineEdit(); self.search_box.setPlaceholderText("메모 검색...")
         self.search_box.setStyleSheet("padding: 8px; font-size: 12pt;")
         self.results_list = QListWidget(); self.results_list.setStyleSheet("font-size: 11pt;")
@@ -124,7 +125,9 @@ class RichMemoViewWindow(QWidget):
 
     def initUI(self):
         self.setWindowTitle('메모 보기')
-        self.setGeometry(250, 250, 700, 800)
+        screen_geometry = get_screen_geometry()
+        self.resize(int(screen_geometry.width() * 0.4), int(screen_geometry.height() * 0.7))
+        center_window(self)
         self.setStyleSheet("background-color: #ffffff;")
         
         layout = QVBoxLayout()
@@ -271,7 +274,10 @@ class MarkdownEditorWindow(QWidget):
         self.autosave_timer.setSingleShot(True)
 
     def initUI(self):
-        self.setWindowTitle('새 메모 작성'); self.setGeometry(150, 150, 1200, 800)
+        self.setWindowTitle('새 메모 작성')
+        screen_geometry = get_screen_geometry()
+        self.resize(int(screen_geometry.width() * 0.6), int(screen_geometry.height() * 0.8))
+        center_window(self)
         main_layout = QVBoxLayout(); main_layout.setContentsMargins(10, 10, 10, 10); main_layout.setSpacing(10)
         top_layout = QHBoxLayout()
         self.title_input = QLineEdit()
@@ -402,7 +408,9 @@ class MemoListWindow(QWidget):
         # 윈도우 기본 설정
         # ===================================================================
         self.setWindowTitle('메모 목록')
-        self.setGeometry(200, 200, 800, 500)
+        screen_geometry = get_screen_geometry()
+        self.resize(int(screen_geometry.width() * 0.5), int(screen_geometry.height() * 0.6))
+        center_window(self)
 
         # ===================================================================
         # 패널 및 레이아웃 생성
@@ -599,7 +607,10 @@ class SettingsWindow(QWidget):
     def __init__(self):
         super().__init__(); self.initUI(); self.load_current_settings()
     def initUI(self):
-        self.setWindowTitle('설정'); self.setGeometry(400, 400, 500, 350); form_layout = QFormLayout(); form_layout.setSpacing(10)
+        self.setWindowTitle('설정');
+        self.resize(500, 350)
+        center_window(self)
+        form_layout = QFormLayout(); form_layout.setSpacing(10)
         self.hotkey_new_edit = QLineEdit(); self.hotkey_list_edit = QLineEdit(); self.hotkey_launcher_edit = QLineEdit()
         self.sheet_id_edit = QLineEdit(); self.folder_id_edit = QLineEdit(); self.page_size_edit = QLineEdit()
         form_layout.addRow(QLabel("새 메모 단축키:"), self.hotkey_new_edit); form_layout.addRow(QLabel("목록 보기 단축키:"), self.hotkey_list_edit); form_layout.addRow(QLabel("빠른 실행 단축키:"), self.hotkey_launcher_edit)
@@ -762,7 +773,8 @@ class TodoDashboardWindow(QWidget):
         self.offset = None # 창 이동을 위한 변수
         
     def initUI(self):
-        self.setFixedSize(500, 600)
+        self.resize(500, 600)
+        center_window(self)
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(10, 10, 10, 10)
         self.setStyleSheet("""
@@ -916,7 +928,8 @@ class CustomNotificationWindow(QWidget):
         self.initUI()
         
     def initUI(self):
-        self.setFixedSize(380, 150)
+        self.resize(380, 150)
+        center_window(self)
 
         # 전체 레이아웃
         main_layout = QVBoxLayout(self)
@@ -991,7 +1004,8 @@ class ToastNotificationWindow(QWidget):
         super().__init__(parent)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setFixedSize(350, 80)
+        self.resize(350, 80)
+        center_window(self)
 
         self.bg_frame = QFrame(self)
         self.bg_frame.setObjectName("ToastFrame")
