@@ -1047,7 +1047,7 @@ class AppController:
             self.rich_viewer.update_favorite_status(is_favorite)
 
         # 2. 네비게이션 트리 업데이트
-        self.emitter.nav_tree_updated.emit(self.all_tags, self.local_cache, self.tag_colors)
+        self.emitter.nav_tree_updated.emit(self.all_tags, self.local_cache)
 
     def load_tasks_thread(self):
         with self.cache_lock:
