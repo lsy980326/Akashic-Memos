@@ -2,6 +2,7 @@ import sys
 import threading
 import json
 import os
+import shutil
 import markdown
 import re
 import webbrowser
@@ -17,9 +18,17 @@ from pystray import Icon as pystray_icon, Menu as pystray_menu, MenuItem as pyst
 from PIL import Image
 from core import google_api_handler, config_manager
 from core.utils import resource_path
-from app_windows import MarkdownEditorWindow, MemoListWindow, SettingsWindow, RichMemoViewWindow, QuickLauncherWindow, TodoDashboardWindow, TodoItemWidget, CustomNotificationWindow, ToastNotificationWindow
+from app_windows import (MarkdownEditorWindow, MemoListWindow, SettingsWindow, RichMemoViewWindow,
+                        QuickLauncherWindow, TodoDashboardWindow, TodoItemWidget, CustomNotificationWindow,
+                        ToastNotificationWindow,KnowledgeGraphWindow)
 import qtawesome as qta
 from datetime import datetime, time
+from pyvis.network import Network
+import networkx as nx
+import http.server
+import socketserver
+import threading
+import functools
 
 class SignalEmitter(QObject):
     show_new_memo = pyqtSignal()
@@ -39,6 +48,7 @@ class SignalEmitter(QObject):
     sync_finished_update_list = pyqtSignal()
     tasks_data_loaded = pyqtSignal(dict)
     toggle_todo_dashboard_signal = pyqtSignal()
+    graph_data_generated = pyqtSignal(dict)
 
 class AppController:
     def __init__(self, app):
@@ -64,6 +74,7 @@ class AppController:
         self.quick_launcher.setWindowIcon(app_icon)
         self.todo_dashboard = TodoDashboardWindow()
         self.notification_window = CustomNotificationWindow()
+        self.graph_window = KnowledgeGraphWindow()
         self.toast_notification_window = ToastNotificationWindow()
 
         self.notification_queue = []
@@ -165,6 +176,9 @@ class AppController:
         self.auto_save_timer.timeout.connect(lambda: self.save_memo(is_auto_save=True))
         self.emitter.auto_save_status_update.connect(self.memo_editor.update_auto_save_status, Qt.QueuedConnection)
         
+        self.memo_list.graph_view_requested.connect(self.show_knowledge_graph)
+        self.emitter.graph_data_generated.connect(self.on_graph_data_generated)
+
     def setup_hotkeys(self):
         try:
             hotkey_new = config_manager.get_setting('Hotkeys', 'new_memo')
@@ -1247,3 +1261,67 @@ class AppController:
     def on_notification_closed(self):
         self.is_notification_active = False
         self.process_notification_queue()
+
+    
+
+    def show_knowledge_graph(self):
+        self.emitter.status_update.emit("지식 그래프를 생성하는 중입니다...", 0)
+        threading.Thread(target=self.build_graph_thread, daemon=True).start()
+
+    def on_graph_data_generated(self, graph_data):
+        if graph_data:
+            try:
+                self.graph_window.show_graph(graph_data)
+                self.graph_window.show()
+                self.graph_window.activateWindow()
+                self.emitter.status_update.emit("그래프 생성 완료.", 3000)
+            except Exception as e:
+                print(f"그래프를 표시하는 중 오류 발생: {e}")
+                self.emitter.status_update.emit("그래프를 표시할 수 없습니다.", 5000)
+        else:
+            self.emitter.status_update.emit("그래프 생성 실패.", 5000)
+
+    def build_graph_thread(self):
+        try:
+            print("[Graph] 지식 그래프 데이터 생성을 시작합니다.")
+
+            nodes = []
+            edges = []
+
+            # 1. 모든 노드(메모) 추가
+            title_to_id_map = {row[0]: row[2] for row in self.local_cache if len(row) > 2}
+            for title, doc_id in title_to_id_map.items():
+                nodes.append({"id": doc_id, "label": title, "title": f"메모 열기: {title}"})
+            print(f"[Graph] {len(nodes)}개의 노드를 추가했습니다.")
+
+            # 2. 모든 엣지(링크) 추가
+            edge_count = 0
+            link_pattern = re.compile(r'\[\[(.*?)\]\]')
+            for source_title, source_doc_id in title_to_id_map.items():
+                # 콘텐츠 캐시(.txt) 우선 사용
+                cache_path = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{source_doc_id}.txt")
+                content = ""
+                if os.path.exists(cache_path):
+                    with open(cache_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                
+                # 캐시가 없으면 API 호출 (느릴 수 있음)
+                if not content:
+                    _, content, _ = google_api_handler.load_doc_content(source_doc_id, as_html=False)
+
+                if content:
+                    matches = link_pattern.findall(content)
+                    for target_title in matches:
+                        target_doc_id = title_to_id_map.get(target_title)
+                        if target_doc_id and source_doc_id != target_doc_id:
+                            edges.append({"from": source_doc_id, "to": target_doc_id})
+                            edge_count += 1
+            
+            print(f"[Graph] {edge_count}개의 엣지를 추가했습니다.")
+
+            graph_data = {"nodes": nodes, "edges": edges}
+            self.emitter.graph_data_generated.emit(graph_data)
+
+        except Exception as e:
+            print(f"그래프 데이터 생성 중 오류: {e}")
+            self.emitter.graph_data_generated.emit(None)

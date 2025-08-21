@@ -9,6 +9,7 @@ a = Analysis(
     binaries=[],
         datas=[
         ('resources', 'resources'),
+        ('lib', 'lib'),
         ('style.qss', '.'),
         ('custom.css', '.')
     ],

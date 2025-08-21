@@ -1,6 +1,6 @@
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QUrl, QSize
 from datetime import datetime
-from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage
+from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage, QWebEngineSettings
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QLineEdit, QHBoxLayout,
                              QTextEdit, QPushButton, QTableWidget, QTableWidgetItem,
                              QHeaderView, QMessageBox, QMenu, QStatusBar, QLabel,
@@ -9,9 +9,10 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QLineEdit, QHBoxLayout,
                              QFileDialog, QToolBar, QAction, QSizePolicy,QScrollArea, QGraphicsDropShadowEffect)
 from PyQt5.QtGui import QDesktopServices, QFont, QTextCursor, QColor
 from core import config_manager
-from core.utils import get_screen_geometry, center_window
+from core.utils import get_screen_geometry, center_window, resource_path
 import qtawesome as qta
 import os
+import json
 
 class LinkHandlingPage(QWebEnginePage):
     linkClicked = pyqtSignal(QUrl)
@@ -393,10 +394,50 @@ class MarkdownEditorWindow(QWidget):
             self.auto_save_status_label.setText(f"{status}")
             self.auto_save_status_label.setStyleSheet("color: #6c757d;") # 기본 회색
 
+class KnowledgeGraphWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("지식 그래프 뷰")
+        self.setGeometry(300, 300, 1000, 700)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.webview = QWebEngineView()
+        layout.addWidget(self.webview)
+
+    def show_graph(self, graph_data):
+        html_template_path = resource_path("resources/graph_template.html")
+        try:
+            with open(html_template_path, 'r', encoding='utf-8') as f:
+                html_content = f.read()
+        except FileNotFoundError:
+            self.webview.setHtml("<h1>Error: graph_template.html not found</h1>")
+            return
+
+        # The base URL must be set correctly for local resources (CSS, JS) to load.
+        # It should point to the directory containing the 'lib' and 'resources' folders.
+        base_url = QUrl.fromLocalFile(resource_path("").replace('\\', '/') + '/')
+        self.webview.setHtml(html_content, baseUrl=base_url)
+
+        graph_data_json = json.dumps(graph_data)
+
+        # It's crucial to run the JavaScript *after* the page has fully loaded.
+        # Using a lambda with loadFinished.connect ensures this.
+        # A single connection is better to avoid issues if this method is called multiple times.
+        try:
+            self.webview.loadFinished.disconnect()
+        except TypeError: # disconnect raises TypeError if no connection exists
+            pass
+        self.webview.loadFinished.connect(
+            lambda: self.webview.page().runJavaScript(f"drawGraph({graph_data_json})")
+        )
+
 class MemoListWindow(QWidget):
     navigation_selected = pyqtSignal(str);
     context_menu_requested = pyqtSignal(object);
     favorite_toggled_from_list = pyqtSignal(str);
+    graph_view_requested = pyqtSignal();
 
     def __init__(self):
         super().__init__();
@@ -444,11 +485,21 @@ class MemoListWindow(QWidget):
         search_layout = QHBoxLayout()
         self.search_bar = QLineEdit()
         self.full_text_search_check = QCheckBox("본문 포함")
+
+        self.graph_button = QPushButton(qta.icon('fa5s.project-diagram', color='#495057'), "")
+        self.graph_button.setObjectName("PagingButton")
+        self.graph_button.setToolTip("지식 그래프 뷰 열기")
+        self.graph_button.clicked.connect(self.graph_view_requested.emit)
+
         self.refresh_button = QPushButton(qta.icon('fa5s.sync-alt', color='#495057'), "")
         self.refresh_button.setObjectName("PagingButton")
 
+
+
+
         search_layout.addWidget(self.search_bar)
         search_layout.addWidget(self.full_text_search_check)
+        search_layout.addWidget(self.graph_button)
         search_layout.addWidget(self.refresh_button)
         right_layout.addLayout(search_layout)
 
