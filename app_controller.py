@@ -30,6 +30,9 @@ import socketserver
 import threading
 import functools
 
+import colorsys
+
+
 class SignalEmitter(QObject):
     show_new_memo = pyqtSignal()
     show_list_memo = pyqtSignal()
@@ -82,6 +85,8 @@ class AppController:
 
         self.local_cache = []
         self.all_tags = set()
+        
+        self.tag_colors = {}
         self.current_viewing_doc_id = None
         self.current_editing_doc_id = None
         self.current_page_token = None
@@ -178,6 +183,20 @@ class AppController:
         
         self.memo_list.graph_view_requested.connect(self.show_knowledge_graph)
         self.emitter.graph_data_generated.connect(self.on_graph_data_generated)
+        self.graph_window.node_clicked.connect(self.on_graph_node_clicked)
+
+    
+
+    def get_tag_color(self, tag):
+        if tag not in self.tag_colors:
+            # 태그의 해시 값을 기반으로 일관된 색상 생성
+            hue = (hash(tag) & 0xFFFFFF) / 0xFFFFFF  # 0.0 ~ 1.0
+            saturation = 0.85  # 채도
+            lightness = 0.60  # 명도
+            rgb_float = colorsys.hls_to_rgb(hue, lightness, saturation)
+            color_hex = f"#{int(rgb_float[0] * 255):02x}{int(rgb_float[1] * 255):02x}{int(rgb_float[2] * 255):02x}"
+            self.tag_colors[tag] = color_hex
+        return self.tag_colors[tag]
 
     def setup_hotkeys(self):
         try:
@@ -315,6 +334,8 @@ class AppController:
             if len(row) > 3 and row[3]:
                 tags = [t.strip().lstrip('#') for t in row[3].replace(',', ' ').split() if t.strip().startswith('#')]
                 self.all_tags.update(tags)
+        
+        
 
     def on_navigation_selected(self, selected_item_id):
         self.memo_list.search_bar.clear()
@@ -1026,7 +1047,7 @@ class AppController:
             self.rich_viewer.update_favorite_status(is_favorite)
 
         # 2. 네비게이션 트리 업데이트
-        self.emitter.nav_tree_updated.emit(self.all_tags, self.local_cache)
+        self.emitter.nav_tree_updated.emit(self.all_tags, self.local_cache, self.tag_colors)
 
     def load_tasks_thread(self):
         with self.cache_lock:
@@ -1351,7 +1372,8 @@ class AppController:
     def on_graph_data_generated(self, graph_data):
         if graph_data:
             try:
-                self.graph_window.show_graph(graph_data)
+                tag_info = graph_data.get("tag_info", {})
+                self.graph_window.show_graph(graph_data, tag_info)
                 self.graph_window.show()
                 self.graph_window.activateWindow()
                 self.emitter.status_update.emit("그래프 생성 완료.", 3000)
@@ -1365,43 +1387,100 @@ class AppController:
         try:
             print("[Graph] 지식 그래프 데이터 생성을 시작합니다.")
 
-            nodes = []
-            edges = []
+            # NetworkX 그래프 생성
+            G = nx.DiGraph()
 
-            # 1. 모든 노드(메모) 추가
+            # --- 데이터 준비 ---
             title_to_id_map = {row[0]: row[2] for row in self.local_cache if len(row) > 2}
-            for title, doc_id in title_to_id_map.items():
-                nodes.append({"id": doc_id, "label": title, "title": f"메모 열기: {title}"})
-            print(f"[Graph] {len(nodes)}개의 노드를 추가했습니다.")
+            doc_id_to_info_map = {row[2]: {"title": row[0], "tags": [t.strip().lstrip('#') for t in row[3].replace(',', ' ').split() if t.strip().startswith('#')] if len(row) > 3 and row[3] else []} for row in self.local_cache if len(row) > 2}
 
-            # 2. 모든 엣지(링크) 추가
-            edge_count = 0
+            # --- 노드 추가 ---
+            for doc_id, info in doc_id_to_info_map.items():
+                G.add_node(doc_id, label=info['title'], title=f"메모 열기: {info['title']}")
+            print(f"[Graph] {G.number_of_nodes()}개의 노드를 추가했습니다.")
+
+            # --- 엣지 추가 ---
             link_pattern = re.compile(r'\[\[(.*?)\]\]')
-            for source_title, source_doc_id in title_to_id_map.items():
-                # 콘텐츠 캐시(.txt) 우선 사용
+            for source_doc_id in G.nodes():
                 cache_path = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{source_doc_id}.txt")
                 content = ""
                 if os.path.exists(cache_path):
                     with open(cache_path, 'r', encoding='utf-8') as f:
                         content = f.read()
-                
-                # 캐시가 없으면 API 호출 (느릴 수 있음)
-                if not content:
+                else:
                     _, content, _ = google_api_handler.load_doc_content(source_doc_id, as_html=False)
 
                 if content:
                     matches = link_pattern.findall(content)
                     for target_title in matches:
                         target_doc_id = title_to_id_map.get(target_title)
-                        if target_doc_id and source_doc_id != target_doc_id:
-                            edges.append({"from": source_doc_id, "to": target_doc_id})
-                            edge_count += 1
+                        if target_doc_id and G.has_node(target_doc_id) and source_doc_id != target_doc_id:
+                            G.add_edge(source_doc_id, target_doc_id)
             
-            print(f"[Graph] {edge_count}개의 엣지를 추가했습니다.")
+            print(f"[Graph] {G.number_of_edges()}개의 엣지를 추가했습니다.")
 
-            graph_data = {"nodes": nodes, "edges": edges}
+            # --- 시각적 속성 설정 ---
+            tag_colors = {}
+            def get_tag_color(tag):
+                if tag not in tag_colors:
+                    hue = (hash(tag) & 0xFFFFFF) / 0xFFFFFF
+                    saturation = 0.85
+                    lightness = 0.60
+                    rgb_float = colorsys.hls_to_rgb(hue, lightness, saturation)
+                    color_hex = f"#{int(rgb_float[0] * 255):02x}{int(rgb_float[1] * 255):02x}{int(rgb_float[2] * 255):02x}"
+                    tag_colors[tag] = color_hex
+                return tag_colors[tag]
+
+            # 1. 태그별 색상 매핑
+            all_graph_tags = {tag for doc_id in G.nodes() for tag in doc_id_to_info_map.get(doc_id, {}).get('tags', [])}
+            
+            tag_to_color_map = {tag: get_tag_color(tag) for tag in all_graph_tags}
+
+            # 2. 노드 크기 및 색상 설정
+            in_degrees = G.in_degree()
+            BASE_NODE_SIZE = 12
+            SCALE_FACTOR = 4
+            
+            nodes_for_vis = []
+            for node_id, data in G.nodes(data=True):
+                degree = in_degrees[node_id]
+                tags = doc_id_to_info_map.get(node_id, {}).get('tags', [])
+                
+                node_color = '#9E9E9E' # 기본 색상
+                if tags:
+                    for tag in tags:
+                        if tag in tag_to_color_map:
+                            node_color = tag_to_color_map[tag]
+                            break
+                
+                nodes_for_vis.append({
+                    "id": node_id,
+                    "label": data['label'],
+                    "title": data['title'],
+                    "size": BASE_NODE_SIZE + (degree * SCALE_FACTOR),
+                    "color": node_color,
+                    "tags": tags
+                })
+
+            # --- 최종 데이터 생성 ---
+            edges_for_vis = [{"from": u, "to": v} for u, v in G.edges()]
+            
+            tag_info = {}
+            for tag, color in tag_to_color_map.items():
+                count = sum(1 for doc_id in G.nodes() if tag in doc_id_to_info_map.get(doc_id, {}).get('tags', []))
+                if count > 0:
+                    tag_info[tag] = {"color": color, "count": count}
+
+            graph_data = {"nodes": nodes_for_vis, "edges": edges_for_vis, "tag_info": tag_info}
+            
             self.emitter.graph_data_generated.emit(graph_data)
 
         except Exception as e:
             print(f"그래프 데이터 생성 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
             self.emitter.graph_data_generated.emit(None)
+
+    def on_graph_node_clicked(self, doc_id):
+        self.graph_window.hide()
+        self.view_memo_by_id(doc_id)

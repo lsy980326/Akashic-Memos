@@ -1,5 +1,6 @@
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QUrl, QSize
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QUrl, QSize, QObject, pyqtSlot
 from datetime import datetime
+from PyQt5.QtWebChannel import QWebChannel
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage, QWebEngineSettings
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QLineEdit, QHBoxLayout,
                              QTextEdit, QPushButton, QTableWidget, QTableWidgetItem,
@@ -7,7 +8,19 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QLineEdit, QHBoxLayout,
                              QFormLayout, QCheckBox, QSplitter, QListWidget,
                              QListWidgetItem, QTreeWidget, QTreeWidgetItem, QFrame,
                              QFileDialog, QToolBar, QAction, QSizePolicy,QScrollArea, QGraphicsDropShadowEffect)
-from PyQt5.QtGui import QDesktopServices, QFont, QTextCursor, QColor
+from PyQt5.QtGui import QDesktopServices, QFont, QTextCursor, QColor, QCursor, QPixmap, QIcon
+
+class ClickableLabel(QLabel):
+    clicked = pyqtSignal(str)
+
+    def __init__(self, text, tag, parent=None):
+        super().__init__(text, parent)
+        self.tag = tag
+        self.setCursor(QCursor(Qt.PointingHandCursor))
+
+    def mousePressEvent(self, event):
+        self.clicked.emit(self.tag)
+
 from core import config_manager
 from core.utils import get_screen_geometry, center_window, resource_path
 import qtawesome as qta
@@ -395,6 +408,9 @@ class MarkdownEditorWindow(QWidget):
             self.auto_save_status_label.setStyleSheet("color: #6c757d;") # 기본 회색
 
 class KnowledgeGraphWindow(QWidget):
+    node_clicked = pyqtSignal(str)
+    tag_clicked = pyqtSignal(str)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("지식 그래프 뷰")
@@ -406,7 +422,85 @@ class KnowledgeGraphWindow(QWidget):
         self.webview = QWebEngineView()
         layout.addWidget(self.webview)
 
-    def show_graph(self, graph_data):
+        # WebChannel 설정
+        self.channel = QWebChannel()
+        self.bridge = GraphSignalBridge()
+        self.bridge.node_clicked.connect(self.node_clicked.emit)
+        self.channel.registerObject("qt_bridge", self.bridge)
+        self.webview.page().setWebChannel(self.channel)
+
+        # 범례(Legend) 위젯 추가
+        self.legend_scroll_area = QScrollArea(self)
+        self.legend_scroll_area.setWidgetResizable(True)
+        self.legend_scroll_area.setFixedWidth(200)
+        self.legend_scroll_area.setFixedHeight(300)
+        self.legend_scroll_area.move(10, 10)
+        self.legend_scroll_area.setStyleSheet(
+            """
+            QScrollArea {
+                background-color: rgba(255, 255, 255, 0.8);
+                border-radius: 5px;
+                border: 1px solid #e0e0e0;
+            }
+        """)
+        self.legend_widget = QWidget()
+        self.legend_layout = QVBoxLayout(self.legend_widget)
+        self.legend_layout.setAlignment(Qt.AlignTop)
+        self.legend_layout.setContentsMargins(10, 10, 10, 10)
+        self.legend_scroll_area.setWidget(self.legend_widget)
+
+        self.tag_clicked.connect(self.on_tag_clicked)
+
+    @pyqtSlot(str)
+    def on_tag_clicked(self, tag_name):
+        # JavaScript 문자열로 안전하게 전달하기 위해 작은따옴표를 이스케이프
+        safe_tag_name = tag_name.replace("'", "'\'")
+        self.webview.page().runJavaScript(f"highlightNodesByTag('{safe_tag_name}');")
+
+    def on_reset_highlight_clicked(self):
+        self.webview.page().runJavaScript("resetHighlight();")
+
+    def show_graph(self, graph_data, tag_info):
+        # 범례 업데이트
+        while self.legend_layout.count():
+            child = self.legend_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+            elif child.layout():
+                # 레이아웃 안의 위젯들도 재귀적으로 삭제
+                while child.layout().count():
+                    sub_child = child.layout().takeAt(0)
+                    if sub_child.widget():
+                        sub_child.widget().deleteLater()
+
+
+        # 강조 해제 버튼 추가
+        reset_button = QPushButton("전체 보기")
+        reset_button.setStyleSheet("background-color: #f0f0f0; border: 1px solid #ccc; padding: 4px; margin-bottom: 5px;")
+        reset_button.setCursor(QCursor(Qt.PointingHandCursor))
+        reset_button.clicked.connect(self.on_reset_highlight_clicked)
+        self.legend_layout.addWidget(reset_button)
+
+        # 태그 버튼들 추가 (count 기준으로 정렬)
+        sorted_tags = sorted(tag_info.items(), key=lambda item: item[1]['count'], reverse=True)
+
+        for tag, info in sorted_tags:
+            color_box = QLabel()
+            color_box.setFixedSize(12, 12)
+            color_box.setStyleSheet(f"background-color: {info['color']}; border-radius: 6px;")
+            
+            tag_button = QPushButton(f"{tag} ({info['count']})")
+            tag_button.setCursor(QCursor(Qt.PointingHandCursor))
+            tag_button.setStyleSheet(f"background-color: transparent; border: none; text-align: left; padding: 2px; color: {info['color']};")
+            tag_button.clicked.connect(lambda checked, t=tag: self.tag_clicked.emit(t))
+
+            h_layout = QHBoxLayout()
+            h_layout.addWidget(color_box)
+            h_layout.addWidget(tag_button)
+            h_layout.addStretch()
+            self.legend_layout.addLayout(h_layout)
+
+        # 그래프 표시
         html_template_path = resource_path("resources/graph_template.html")
         try:
             with open(html_template_path, 'r', encoding='utf-8') as f:
@@ -415,23 +509,27 @@ class KnowledgeGraphWindow(QWidget):
             self.webview.setHtml("<h1>Error: graph_template.html not found</h1>")
             return
 
-        # The base URL must be set correctly for local resources (CSS, JS) to load.
-        # It should point to the directory containing the 'lib' and 'resources' folders.
         base_url = QUrl.fromLocalFile(resource_path("").replace('\\', '/') + '/')
         self.webview.setHtml(html_content, baseUrl=base_url)
 
         graph_data_json = json.dumps(graph_data)
 
-        # It's crucial to run the JavaScript *after* the page has fully loaded.
-        # Using a lambda with loadFinished.connect ensures this.
-        # A single connection is better to avoid issues if this method is called multiple times.
+        # loadFinished 시그널이 여러번 연결되는 것을 방지
         try:
             self.webview.loadFinished.disconnect()
-        except TypeError: # disconnect raises TypeError if no connection exists
-            pass
+        except TypeError:
+            pass # 연결이 안되어있을 때 오류 방지
         self.webview.loadFinished.connect(
             lambda: self.webview.page().runJavaScript(f"drawGraph({graph_data_json})")
         )
+
+class GraphSignalBridge(QObject):
+    node_clicked = pyqtSignal(str)
+
+    @pyqtSlot(str)
+    def on_node_clicked(self, node_id):
+        self.node_clicked.emit(node_id)
+
 
 class MemoListWindow(QWidget):
     navigation_selected = pyqtSignal(str);
