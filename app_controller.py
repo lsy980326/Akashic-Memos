@@ -264,10 +264,25 @@ class AppController:
         threading.Thread(target=self.sync_cache_thread, daemon=True).start()
 
     def sync_cache_thread(self):
-        new_data = google_api_handler.load_memo_list()
+        sheet_data = google_api_handler.load_memo_list()
+        if sheet_data is None:
+            self.emitter.status_update.emit("목록 동기화 실패 (시트 로드 오류)", 5000)
+            return
+
+        # 데이터베이스 유효성 검사: 시트에 있는 ID가 실제 Drive에 존재하는지 확인
+        validated_data = []
+        for row in sheet_data:
+            if len(row) > 2 and row[2]: # ID가 있는지 확인
+                if google_api_handler.check_doc_exists(row[2]):
+                    validated_data.append(row)
+                else:
+                    print(f"[Sync] 구글 시트의 문서 ID({row[2]})가 실제 구글 드라이브에 존재하지 않아 목록에서 제외합니다: {row[0]}")
+            else:
+                 print(f"[Sync] 구글 시트의 행에 문서 ID가 없어 제외합니다: {row}")
+
         with self.cache_lock:
-            if new_data is not None and new_data != self.local_cache:
-                self.local_cache = new_data
+            if validated_data != self.local_cache:
+                self.local_cache = validated_data
                 self.update_tags_from_cache()
                 try:
                     with open(config_manager.CACHE_FILE, 'w', encoding='utf-8') as f:
@@ -278,6 +293,8 @@ class AppController:
                 self.emitter.nav_tree_updated.emit(self.all_tags, self.local_cache)
                 self.emitter.sync_finished_update_list.emit()
                 self.emitter.status_update.emit("동기화 완료.", 5000)
+            else:
+                self.emitter.status_update.emit("이미 최신 상태입니다.", 3000)
 
     def load_cache_only(self, initial_load=False):
         try:
@@ -568,38 +585,48 @@ class AppController:
             return
 
         self.rich_viewer.update_favorite_status(doc_id in self.favorites)
-        
         self.current_viewing_doc_id = doc_id
         
-        # 로컬 캐시에서 제목과 태그 우선 로드
         cached_info = next((row for row in self.local_cache if row[2] == doc_id), None)
         title_from_cache = cached_info[0] if cached_info else "불러오는 중..."
-        tags_from_cache = cached_info[3] if cached_info else ""
+        tags_from_cache = cached_info[3] if cached_info and len(cached_info) > 3 else ""
 
         cache_path = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.html")
+        is_background_check = False
         if os.path.exists(cache_path):
             try:
                 with open(cache_path, 'r', encoding='utf-8') as f:
                     cached_html_full = f.read()
                 self.emitter.show_rich_view.emit(title_from_cache, cached_html_full)
+                is_background_check = True # 캐시된 내용을 보여줬으므로, 동기화는 백그라운드 확인 작업임
             except Exception:
                 self.emitter.show_rich_view.emit("오류", "캐시 파일을 읽을 수 없습니다.")
         else:
-            # 콘텐츠가 캐시에 없으면 '불러오는 중' 메시지를 즉시 표시
+            # 캐시가 없으면 로딩 메시지를 표시
             loading_html = self._get_final_html(title_from_cache, "<body><p>콘텐츠를 불러오는 중입니다...</p></body>", tags_from_cache)
             self.emitter.show_rich_view.emit(title_from_cache, loading_html)
 
-        # 항상 최신 콘텐츠를 백그라운드에서 동기화
-        threading.Thread(target=self.sync_rich_content_thread, args=(doc_id,), daemon=True).start()
+        # 백그라운드에서 최신 콘텐츠 동기화
+        threading.Thread(target=self.sync_rich_content_thread, args=(doc_id, is_background_check), daemon=True).start()
 
-    def sync_rich_content_thread(self, doc_id):
-        # API에서 최신 콘텐츠 로드
+    def sync_rich_content_thread(self, doc_id, is_background_check=False):
         title, html_body, tags = google_api_handler.load_doc_content(doc_id, as_html=True)
-        if title is None:
-            # 로드 실패 시 현재 뷰어에 표시된 콘텐츠를 유지
+        
+        if title is None: # 404 Not Found
+            # 캐시된 내용을 이미 보여주고 있는 경우, 화면을 덮어쓰지 않고 알림만 표시
+            if is_background_check:
+                print(f"[Sync] 백그라운드 확인 중 문서 없음 확인 (ID: {doc_id}). 캐시를 정리합니다.")
+                self.emitter.toast_notification.emit("문서 없음", "이 메모는 서버에서 삭제된 것 같습니다.")
+            else:
+                # 캐시가 없어서 로딩 화면을 보여주던 경우, "찾을 수 없음" 페이지를 표시
+                error_html = self._get_final_html("오류: 문서를 찾을 수 없음", "<body><h2>문서를 찾을 수 없습니다.</h2><p>해당 문서가 삭제되었거나 접근 권한이 없는 것 같습니다.</p></body>", "")
+                self.emitter.show_rich_view.emit("오류: 문서를 찾을 수 없음", error_html)
+            
+            # 두 경우 모두, 오래된 캐시와 목록을 정리
+            self.cleanup_stale_document(doc_id)
             return
 
-        # 이미지 처리 및 HTML 완성
+        # --- 문서가 정상적으로 로드된 경우 ---
         processed_html_body = self._process_html_images(html_body)
         new_html_full = self._get_final_html(title, processed_html_body, tags)
         
@@ -612,17 +639,44 @@ class AppController:
             except IOError:
                 pass
 
-        # 콘텐츠에 변경이 있을 경우에만 캐시 파일 업데이트 및 뷰 갱신
+        # 내용이 변경되었을 경우에만 캐시 파일 업데이트 및 뷰 갱신
         if new_html_full != current_html_full:
             try:
                 with open(cache_path, 'w', encoding='utf-8') as f:
                     f.write(new_html_full)
+                print(f"[Sync] 문서 내용이 변경되어 캐시와 뷰를 업데이트했습니다 (ID: {doc_id})")
+                if self.rich_viewer.isVisible() and self.current_viewing_doc_id == doc_id:
+                    self.emitter.show_rich_view.emit(title, new_html_full)
             except Exception as e:
                 print(f"콘텐츠 캐시 저장 오류: {e}")
-            
-            # 현재 보고 있는 문서일 경우에만 뷰를 새로고침
-            if self.rich_viewer.isVisible() and self.current_viewing_doc_id == doc_id:
-                self.emitter.show_rich_view.emit(title, new_html_full)
+
+    def cleanup_stale_document(self, doc_id):
+        # 1. 오래된 로컬 콘텐츠 캐시 파일(.html, .txt) 삭제
+        cache_path_html = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.html")
+        cache_path_txt = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.txt")
+        if os.path.exists(cache_path_html):
+            try: os.remove(cache_path_html)
+            except OSError as e: print(f"HTML 캐시 삭제 오류: {e}")
+        if os.path.exists(cache_path_txt):
+            try: os.remove(cache_path_txt)
+            except OSError as e: print(f"TXT 캐시 삭제 오류: {e}")
+
+        # 2. 메인 캐시 리스트(self.local_cache)에서 해당 문서 제거
+        with self.cache_lock:
+            initial_len = len(self.local_cache)
+            self.local_cache = [row for row in self.local_cache if len(row) > 2 and row[2] != doc_id]
+            if len(self.local_cache) < initial_len:
+                print(f"삭제된 문서({doc_id})를 메인 캐시에서 제거했습니다.")
+                try:
+                    with open(config_manager.CACHE_FILE, 'w', encoding='utf-8') as f:
+                        json.dump(self.local_cache, f, ensure_ascii=False, indent=4)
+                except IOError as e:
+                    print(f"캐시 파일 쓰기 오류: {e}")
+                
+                # 3. UI 업데이트 (목록 및 태그 트리 새로고침)
+                self.update_tags_from_cache()
+                self.emitter.nav_tree_updated.emit(self.all_tags, self.local_cache)
+                self.emitter.sync_finished_update_list.emit()
 
     def _process_html_images(self, html_body):
         soup = BeautifulSoup(html_body, 'html.parser')
@@ -864,7 +918,9 @@ class AppController:
     def on_link_activated(self, url):
         url_string = url.toString()
         if url_string.startswith('memo://'):
-            self.view_memo_by_id(url_string.replace('memo://', ''))
+            # 사용자 요청: memo:// 링크는 네트워크 확인 없이 로컬 캐시만으로 동작
+            doc_id = url_string.replace('memo://', '')
+            self.view_memo_from_cache_only(doc_id)
         elif url_string.startswith('tag://'):
             tag_name = url_string.replace('tag://', '')
             self.show_memo_list_window()
@@ -874,6 +930,29 @@ class AppController:
                 self.on_navigation_selected(items[0].text(0))
         else:
             QDesktopServices.openUrl(url)
+
+    def view_memo_from_cache_only(self, doc_id):
+        # 네트워크 작업 없이 오직 로컬 캐시만으로 문서를 여는 새로운 함수
+        cached_info = next((row for row in self.local_cache if row[2] == doc_id), None)
+        title = cached_info[0] if cached_info else "캐시된 메모"
+
+        cache_path = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.html")
+        
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    cached_html_full = f.read()
+                
+                self.rich_viewer.update_favorite_status(doc_id in self.favorites)
+                self.current_viewing_doc_id = doc_id
+                self.emitter.show_rich_view.emit(title, cached_html_full)
+            except Exception as e:
+                error_html = self._get_final_html("오류", f"<body><p>캐시 파일을 읽는 중 오류가 발생했습니다: {e}</p></body>", "")
+                self.emitter.show_rich_view.emit("오류", error_html)
+        else:
+            # 캐시가 없으면, 캐시가 없다고 명확히 알려줌
+            error_html = self._get_final_html("오프라인", "<body><p>이 문서에 대한 로컬 캐시가 없습니다. 목록에서 문서를 열어 동기화해주세요.</p></body>", "")
+            self.emitter.show_rich_view.emit("오프라인", error_html)
 
     def edit_tags_from_viewer(self):
         if not self.current_viewing_doc_id:
@@ -967,7 +1046,8 @@ class AppController:
 
                 if content is None:
                     _, markdown_content, _ = google_api_handler.load_doc_content(doc_id, as_html=False)
-                    if markdown_content:
+                    # 문서 로드에 실패한 경우(None) content는 None으로 유지
+                    if markdown_content is not None:
                         content = markdown_content
                         try:
                             cache_dir = os.path.dirname(cache_path)

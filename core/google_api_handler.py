@@ -1,4 +1,5 @@
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 from core.auth import get_credentials
 from core import config_manager
@@ -67,7 +68,7 @@ def _upload_image_to_drive(drive_service, image_path):
 def _process_images_for_upload(drive_service, markdown_content):
     # Regex to find markdown image tags with local paths
     # It should not match http/https links
-    pattern = re.compile(r'\!\[(.*?)\]\((?!https?://)(.*?)\)')
+    pattern = re.compile(r'\!\\\[(.*?)\]\((?!https?://)(.*?)\)')
     
     new_content = markdown_content
     matches = pattern.finditer(markdown_content)
@@ -212,9 +213,16 @@ def load_doc_content(doc_id, as_html=True, body_only=False):
         html_body = markdown.markdown(plain_text, extensions=['fenced_code', 'codehilite', 'tables', 'nl2br', 'sane_lists'])
         return title, html_body, tags_text
 
+    except HttpError as e:
+        if e.resp.status == 404:
+            print(f"문서(ID: {doc_id})를 찾을 수 없습니다 (404).")
+            return None, None, None
+        else:
+            print(f"문서 내용 변환 중 HttpError 발생: {e}")
+            return "오류", f"<p>내용을 불러오는 중 오류가 발생했습니다: {e}</p>", ""
     except Exception as e:
-        print(f"문서 내용 변환 중 오류 발생: {e}")
-        return "오류", "<p>내용을 불러올 수 없습니다.</p>", ""
+        print(f"문서 내용 변환 중 알 수 없는 오류 발생: {e}")
+        return "오류", f"<p>내용을 불러오는 중 알 수 없는 오류가 발생했습니다: {e}</p>", ""
 
 
 
@@ -249,7 +257,7 @@ def search_memos_by_content(query=None, page_token=None):
                           'fields': 'nextPageToken, files(id, name, createdTime)', 'pageSize': PAGE_SIZE}
         if page_token: request_params['pageToken'] = page_token
         if query:
-            sanitized_query = query.replace("'", "\\'"); search_query += f" and fullText contains '{sanitized_query}'"
+            sanitized_query = query.replace("'", "\'"); search_query += f" and fullText contains '{sanitized_query}'"
             request_params['q'] = search_query
         else: request_params['orderBy'] = 'createdTime desc'
         response = drive_service.files().list(**request_params).execute()
@@ -381,4 +389,35 @@ def update_checklist_item(doc_id, original_line, is_checked):
 
     except Exception as e:
         print(f"체크리스트 업데이트 중 오류 발생: {e}")
+        return False
+
+def get_all_tags():
+    _, sheets_service, _ = get_services()
+    SPREADSHEET_ID = config_manager.get_setting('Google', 'spreadsheet_id')
+    try:
+        result = sheets_service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID, range='D2:D').execute()
+        values = result.get('values', [])
+        all_tags = set()
+        for row in values:
+            if row:
+                tags = [tag.strip() for tag in row[0].replace(',', ' ').split() if tag.strip()]
+                all_tags.update(tags)
+        return sorted(list(all_tags))
+    except Exception as e:
+        print(f"태그 로딩 중 오류 발생: {e}")
+        return []
+
+def check_doc_exists(doc_id):
+    _, _, drive_service = get_services()
+    try:
+        drive_service.files().get(fileId=doc_id, fields='id').execute()
+        return True
+    except HttpError as e:
+        if e.resp.status == 404:
+            return False
+        print(f"문서 존재 확인 중 오류 발생 (ID: {doc_id}): {e}")
+        return False
+    except Exception as e:
+        print(f"문서 존재 확인 중 알 수 없는 오류 발생 (ID: {doc_id}): {e}")
         return False
