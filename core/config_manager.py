@@ -143,7 +143,11 @@ def get_window_state(window_name):
 # ===================================================================
 import json
 
+FAVORITES_FILE = os.path.join(APP_DATA_DIR, 'favorites.json')
 NOTIFIED_TASKS_FILE = os.path.join(APP_DATA_DIR, 'notified_tasks.json')
+SERIES_CACHE_FILE = os.path.join(APP_DATA_DIR, 'series_cache.json')
+
+# --- 설정 파일 관리 ---
 
 def save_notified_tasks(tasks_dict):
     """Saves the dictionary of notified task IDs and their notification dates to the file."""
@@ -167,3 +171,21 @@ def load_notified_tasks():
     except (IOError, json.JSONDecodeError) as e:
         print(f"Error loading notified tasks file: {e}")
         return {}
+
+# --- 시리즈 캐시 관리 ---
+def load_series_cache():
+    if not os.path.exists(SERIES_CACHE_FILE):
+        return {}
+    try:
+        with open(SERIES_CACHE_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (IOError, json.JSONDecodeError) as e:
+        print(f"시리즈 캐시 로드 실패: {e}")
+        return {}
+
+def save_series_cache(cache_data):
+    try:
+        with open(SERIES_CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(cache_data, f, ensure_ascii=False, indent=4)
+    except IOError as e:
+        print(f"시리즈 캐시 저장 실패: {e}")

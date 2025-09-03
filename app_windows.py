@@ -131,10 +131,15 @@ class RichMemoViewWindow(QWidget):
     edit_requested = pyqtSignal()
     open_in_gdocs_requested = pyqtSignal()
     favorite_toggled = pyqtSignal()
+    add_chapter_requested = pyqtSignal()
+    navigation_requested = pyqtSignal(str)
+    refresh_requested = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
         self.current_zoom_factor = 1.0
+        self.parent_moc_id = None
+        self.current_doc_id = None # 현재 문서 ID 저장
         self.initUI()
 
     def initUI(self):
@@ -154,51 +159,82 @@ class RichMemoViewWindow(QWidget):
         self.page.linkClicked.connect(self.link_activated)
         self.content_display.tags_edit_requested.connect(self.tags_edit_requested.emit)
 
-        toolbar = QToolBar("Main Toolbar")
-        toolbar.setObjectName("RichViewToolbar")
-        toolbar.setIconSize(QSize(22, 22))
+
+        self.toolbar = QToolBar("Main Toolbar")
+        self.toolbar.setObjectName("RichViewToolbar")
+        self.toolbar.setIconSize(QSize(22, 22))
 
         icon_color = '#495057'
+        
+
         self.edit_action = QAction(qta.icon('fa5s.pencil-alt', color=icon_color), "편집", self)
         self.edit_action.setToolTip("이 메모를 편집합니다.")
         self.edit_action.triggered.connect(self.edit_requested.emit)
-        toolbar.addAction(self.edit_action)
+        self.toolbar.addAction(self.edit_action)
+
+        refresh_action = QAction(qta.icon('fa5s.sync-alt', color=icon_color), "새로고침", self)
+        refresh_action.setToolTip("현재 메모를 새로고침합니다.")
+        refresh_action.triggered.connect(self.on_refresh_triggered)
+        self.toolbar.addAction(refresh_action)
+
+        self.add_chapter_action = QAction(qta.icon('fa5s.plus-circle', color=icon_color), "회차 추가", self)
+        self.add_chapter_action.setToolTip("이 시리즈에 새로운 회차 메모를 추가합니다.")
+        self.add_chapter_action.triggered.connect(self.add_chapter_requested.emit)
+        self.add_chapter_action.setVisible(False) # ★★★ 기본적으로는 숨겨 둠 ★★★
+        self.toolbar.addAction(self.add_chapter_action)
+
+        self.gdocs_action = QAction(qta.icon('fa5b.google-drive', color=icon_color), "Google Docs에서 열기", self)
 
         self.gdocs_action = QAction(qta.icon('fa5b.google-drive', color=icon_color), "Google Docs에서 열기", self)
         self.gdocs_action.setToolTip("웹 브라우저에서 Google Docs로 엽니다.")
         self.gdocs_action.triggered.connect(self.open_in_gdocs_requested.emit)
-        toolbar.addAction(self.gdocs_action)
+        self.toolbar.addAction(self.gdocs_action)
         
-        toolbar.addSeparator()
+        self.toolbar.addSeparator()
+
+        self.prev_chapter_action = QAction(qta.icon('fa5s.arrow-left', color=icon_color), "이전 회차", self)
+        self.prev_chapter_action.triggered.connect(lambda: self.navigation_requested.emit(self.prev_chapter_id))
+        self.prev_chapter_action.setVisible(False)
+        self.toolbar.addAction(self.prev_chapter_action)
+
+        self.moc_action = QAction(qta.icon('fa5s.list-ul', color=icon_color), "목차로", self)
+        self.moc_action.triggered.connect(lambda: self.navigation_requested.emit(self.parent_moc_id))
+        self.moc_action.setVisible(False)
+        self.toolbar.addAction(self.moc_action)
+
+        self.next_chapter_action = QAction(qta.icon('fa5s.arrow-right', color=icon_color), "다음 회차", self)
+        self.next_chapter_action.triggered.connect(lambda: self.navigation_requested.emit(self.next_chapter_id))
+        self.next_chapter_action.setVisible(False)
+        self.toolbar.addAction(self.next_chapter_action)
 
         find_button = QPushButton(qta.icon('fa5s.search', color=icon_color), "")
         find_button.setToolTip("내용에서 텍스트를 검색합니다.")
         find_button.setCheckable(True)
         find_button.toggled.connect(self.toggle_find_box)
-        toolbar.addWidget(find_button)
+        self.toolbar.addWidget(find_button)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        toolbar.addWidget(spacer)
+        self.toolbar.addWidget(spacer)
 
         zoom_out_action = QAction(qta.icon('fa5s.search-minus', color=icon_color), "축소", self)
         zoom_out_action.setToolTip("본문 축소")
         zoom_out_action.triggered.connect(self.zoom_out)
-        toolbar.addAction(zoom_out_action)
+        self.toolbar.addAction(zoom_out_action)
 
         self.zoom_label = QLabel(f"{int(self.current_zoom_factor * 100)}%")
         self.zoom_label.setStyleSheet("padding: 0 8px; color: #333;")
-        toolbar.addWidget(self.zoom_label)
+        self.toolbar.addWidget(self.zoom_label)
 
         zoom_in_action = QAction(qta.icon('fa5s.search-plus', color=icon_color), "확대", self)
         zoom_in_action.setToolTip("본문 확대")
         zoom_in_action.triggered.connect(self.zoom_in)
-        toolbar.addAction(zoom_in_action)
+        self.toolbar.addAction(zoom_in_action)
 
         self.fav_action = QAction(qta.icon('fa5s.star', color='#666'), "즐겨찾기", self)
         self.fav_action.setCheckable(True) # 토글 버튼으로 만듬
         self.fav_action.triggered.connect(self.favorite_toggled.emit)
-        toolbar.addAction(self.fav_action)
+        self.toolbar.addAction(self.fav_action)
 
         toolbar_area = QFrame()
         toolbar_area.setObjectName("ToolbarArea")
@@ -208,7 +244,7 @@ class RichMemoViewWindow(QWidget):
         toolbar_layout.setContentsMargins(0, 0, 0, 0)
         toolbar_layout.setSpacing(0)
         
-        toolbar_layout.addWidget(toolbar)
+        toolbar_layout.addWidget(self.toolbar)
 
         self.search_widget = SearchWidget(self)
         self.search_widget.setObjectName("SearchWidget")
@@ -225,14 +261,94 @@ class RichMemoViewWindow(QWidget):
         layout.addWidget(self.content_display)
         self.setLayout(layout)
 
-    def set_content(self, title, html_content):
+    def set_view_mode(self, is_moc, is_chapter, parent_moc_info, prev_chapter_id, next_chapter_id):
+        # 1. MOC 자체에서만 '회차 추가' 버튼 보이기
+        self.add_chapter_action.setVisible(is_moc)
+
+        # 2. 회차 문서라면, 이전/목차/다음 버튼을 "무조건" 보이게 처리
+        self.moc_action.setVisible(is_chapter)
+        self.prev_chapter_action.setVisible(is_chapter)
+        self.next_chapter_action.setVisible(is_chapter)
+
+        # 3. 실제 정보가 있을 때만 버튼을 "활성화"
+        self.moc_action.setEnabled(bool(parent_moc_info))
+        self.prev_chapter_action.setEnabled(bool(prev_chapter_id))
+        self.next_chapter_action.setEnabled(bool(next_chapter_id))
+
+        # 4. 컨트롤러로부터 받은 ID 정보 저장
+        self.parent_moc_id = parent_moc_info['doc_id'] if parent_moc_info else None
+        self.prev_chapter_id = prev_chapter_id
+        self.next_chapter_id = next_chapter_id
+        
+        # 5. 툴바 강제 업데이트
+        self.toolbar.update()
+        self.toolbar.repaint()
+
+    def _update_view_mode_from_stored_info(self):
+        """저장된 정보를 사용하여 뷰 모드를 업데이트합니다."""
+        print(f"DEBUG: _update_view_mode_from_stored_info 호출됨")
+        print(f"DEBUG: parent_moc_id = {self.parent_moc_id}")
+        print(f"DEBUG: prev_chapter_id = {self.prev_chapter_id}")
+        print(f"DEBUG: next_chapter_id = {self.next_chapter_id}")
+        
+        # 현재 문서가 시리즈 문서인지 확인 (parent_moc_id가 있으면 시리즈 문서)
+        is_chapter = bool(self.parent_moc_id)
+        print(f"DEBUG: is_chapter = {is_chapter}")
+        
+        # 시리즈 문서라면 네비게이션 버튼들을 보이게 설정
+        if is_chapter:
+            print("DEBUG: 시리즈 문서로 인식, 네비게이션 버튼들 표시")
+            self.moc_action.setVisible(True)
+            self.prev_chapter_action.setVisible(True)
+            self.next_chapter_action.setVisible(True)
+            
+            # 버튼 활성화 상태 설정
+            self.moc_action.setEnabled(bool(self.parent_moc_id))
+            self.prev_chapter_action.setEnabled(bool(self.prev_chapter_id))
+            self.next_chapter_action.setEnabled(bool(self.next_chapter_id))
+        else:
+            print("DEBUG: 일반 문서로 인식, 네비게이션 버튼들 숨김")
+            # 시리즈 문서가 아니라면 네비게이션 버튼들을 숨김
+            self.moc_action.setVisible(False)
+            self.prev_chapter_action.setVisible(False)
+            self.next_chapter_action.setVisible(False)
+        
+        # MOC 문서인지 확인 (시리즈 문서가 아니면 MOC로 가정)
+        # 시리즈 문서가 아닌 경우, MOC 문서일 가능성이 높으므로 회차 추가 버튼 표시
+        if not is_chapter:
+            print('DEBUG: 시리즈 문서가 아니므로 MOC로 가정, 회차 추가 버튼 표시')
+            self.add_chapter_action.setVisible(True)
+        else:
+            print('DEBUG: 시리즈 문서이므로 회차 추가 버튼 숨김')
+            self.add_chapter_action.setVisible(False)
+        
+        # 툴바 강제 업데이트
+        self.toolbar.update()
+        self.toolbar.repaint()
+        print("DEBUG: 뷰 모드 업데이트 완료")
+
+    def set_content(self, doc_id, title, html_content, view_mode_info):
+        # view_mode_info가 제공된 경우 set_view_mode 호출
+        if view_mode_info:
+            self.set_view_mode(**view_mode_info)
+        else:
+            # view_mode_info가 없는 경우 (캐시된 문서 등), 기존 저장된 정보로 뷰 모드 업데이트
+            self._update_view_mode_from_stored_info()
+        
+        self.current_doc_id = doc_id # 현재 문서 ID 저장
         self.setWindowTitle(title)
         base_url = QUrl.fromLocalFile(os.path.abspath(os.getcwd()).replace('\\', '/') + '/')
         self.content_display.setHtml(html_content, base_url)
         self.content_display.setZoomFactor(self.current_zoom_factor)
+        
+        # 히스토리 버튼 상태 업데이트
         self.show()
         self.activateWindow()
         self.raise_()
+
+    def on_refresh_triggered(self):
+        if self.current_doc_id:
+            self.refresh_requested.emit(self.current_doc_id)
 
     def zoom_in(self):
         self.current_zoom_factor = min(2.0, self.current_zoom_factor + 0.1)
@@ -1210,3 +1326,6 @@ class ToastNotificationWindow(QWidget):
         
         self.show()
         self.hide_timer.start(3000) # Hide after 3 seconds
+
+
+

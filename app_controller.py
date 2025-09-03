@@ -17,6 +17,7 @@ import keyboard
 from pystray import Icon as pystray_icon, Menu as pystray_menu, MenuItem as pystray_menu_item
 from PIL import Image
 from core import google_api_handler, config_manager
+from core.config_manager import load_series_cache, save_series_cache
 from core.utils import resource_path
 from app_windows import (MarkdownEditorWindow, MemoListWindow, SettingsWindow, RichMemoViewWindow,
                         QuickLauncherWindow, TodoDashboardWindow, TodoItemWidget, CustomNotificationWindow,
@@ -39,7 +40,7 @@ class SignalEmitter(QObject):
     show_settings = pyqtSignal()
     show_quick_launcher = pyqtSignal()
     show_edit_memo = pyqtSignal(str, str, str, str)
-    show_rich_view = pyqtSignal(str, str)
+    show_rich_view = pyqtSignal(str, str, str, dict)
     list_data_loaded = pyqtSignal(list, bool)
     nav_tree_updated = pyqtSignal(set, list)
     status_update = pyqtSignal(str, int)
@@ -99,6 +100,7 @@ class AppController:
         self.launcher_mode = 'memos'
         self.is_loading_tasks = False
         self.cache_lock = threading.Lock()
+        self.series_cache = {}
 
         self.all_tasks = []
         self.show_completed_tasks = False
@@ -119,6 +121,9 @@ class AppController:
 
         self.favorites = []
         self.load_favorites()
+
+        self.series_cache = load_series_cache()
+        QTimer.singleShot(3000, self.rebuild_series_cache_if_needed) # 3초 후 실행
 
     def connect_signals_and_slots(self):
         self.emitter.show_new_memo.connect(self.show_new_memo_window, Qt.QueuedConnection)
@@ -169,7 +174,10 @@ class AppController:
         self.rich_viewer.tags_edit_requested.connect(self.edit_tags_from_viewer)
         self.rich_viewer.edit_requested.connect(self.edit_current_viewing_memo)
         self.rich_viewer.open_in_gdocs_requested.connect(self.open_current_memo_in_gdocs)
+        self.rich_viewer.refresh_requested.connect(self.on_viewer_refresh_requested)
 
+        self.rich_viewer.add_chapter_requested.connect(self.on_add_chapter_requested) 
+        self.rich_viewer.navigation_requested.connect(self.view_memo_by_id)
         self.rich_viewer.favorite_toggled.connect(self.toggle_favorite_from_viewer)
         self.memo_list.favorite_toggled_from_list.connect(self.toggle_favorite)
         self.emitter.favorite_status_changed.connect(self.on_favorite_status_changed)
@@ -312,6 +320,7 @@ class AppController:
                 self.emitter.nav_tree_updated.emit(self.all_tags, self.local_cache)
                 self.emitter.sync_finished_update_list.emit()
                 self.emitter.status_update.emit("동기화 완료.", 5000)
+                self.rebuild_series_cache_if_needed() # 시리즈 캐시 업데이트
             else:
                 self.emitter.status_update.emit("이미 최신 상태입니다.", 3000)
 
@@ -596,6 +605,67 @@ class AppController:
             self.emitter.status_update.emit("업데이트 실패", 5000)
 
 
+    def _get_view_mode_info(self, doc_id):
+        print(f"DEBUG: _get_view_mode_info 호출됨 - doc_id: {doc_id}")
+        
+        is_moc = False
+        is_chapter = False
+        parent_moc_info = None
+        prev_chapter_id = None
+        next_chapter_id = None
+
+        cached_info = next((row for row in self.local_cache if row[2] == doc_id), None)
+        if cached_info:
+            tags_text = cached_info[3].lower() if len(cached_info) > 3 else ""
+            current_title = cached_info[0]
+            print(f"DEBUG: cached_info - title: {current_title}, tags: {tags_text}")
+            
+            if '#moc' in tags_text or '#시리즈' in tags_text:
+                is_moc = True
+                print(f"DEBUG: MOC 문서로 인식됨")
+            else:
+                if doc_id in self.series_cache:
+                    is_chapter = True
+                    print(f"DEBUG: series_cache에서 시리즈 문서로 인식됨")
+                else:
+                    all_mocs = [row for row in self.local_cache if len(row) > 3 and ('#moc' in row[3].lower() or '#시리즈' in row[3].lower())]
+                    for moc_row in all_mocs:
+                        moc_title = moc_row[0]
+                        if current_title.startswith(moc_title + " - "):
+                            is_chapter = True
+                            print(f"DEBUG: 제목 패턴으로 시리즈 문서로 인식됨 - MOC: {moc_title}")
+                            break
+        
+        # 대소문자 구분 없이 series_cache에서 찾기
+        series_info = None
+        for cache_id, info in self.series_cache.items():
+            if cache_id.lower() == doc_id.lower():
+                series_info = info
+                break
+        
+        if series_info:
+            is_chapter = True  # 시리즈 정보를 찾았으면 시리즈 문서로 설정
+            parent_moc_info = {
+                'doc_id': series_info['parent_moc_id'],
+                'title': series_info['parent_moc_title']
+            }
+            prev_chapter_id = series_info['prev_chapter_id']
+            next_chapter_id = series_info['next_chapter_id']
+            print(f"DEBUG: series_cache 정보 찾음 - parent: {parent_moc_info}, prev: {prev_chapter_id}, next: {next_chapter_id}")
+        else:
+            print(f"DEBUG: series_cache에 정보 없음 - doc_id: {doc_id}")
+            print(f"DEBUG: 현재 series_cache 키들: {list(self.series_cache.keys())}")
+        
+        result = {
+            'is_moc': is_moc,
+            'is_chapter': is_chapter,
+            'parent_moc_info': parent_moc_info,
+            'prev_chapter_id': prev_chapter_id,
+            'next_chapter_id': next_chapter_id
+        }
+        print(f"DEBUG: 반환값: {result}")
+        return result
+
     def view_memo_from_item(self, item):
         doc_id = item.data(Qt.UserRole)
         self.view_memo_by_id(doc_id)
@@ -605,6 +675,7 @@ class AppController:
             self.rich_viewer.activateWindow()
             return
 
+        view_mode_info = self._get_view_mode_info(doc_id)
         self.rich_viewer.update_favorite_status(doc_id in self.favorites)
         self.current_viewing_doc_id = doc_id
         
@@ -618,36 +689,29 @@ class AppController:
             try:
                 with open(cache_path, 'r', encoding='utf-8') as f:
                     cached_html_full = f.read()
-                self.emitter.show_rich_view.emit(title_from_cache, cached_html_full)
-                is_background_check = True # 캐시된 내용을 보여줬으므로, 동기화는 백그라운드 확인 작업임
+                self.emitter.show_rich_view.emit(doc_id, title_from_cache, cached_html_full, view_mode_info)
+                is_background_check = True
             except Exception:
-                self.emitter.show_rich_view.emit("오류", "캐시 파일을 읽을 수 없습니다.")
+                error_html = self._get_final_html("오류", "<body><p>캐시 파일을 읽을 수 없습니다.</p></body>", "")
+                self.emitter.show_rich_view.emit(doc_id, "오류", error_html, view_mode_info)
         else:
-            # 캐시가 없으면 로딩 메시지를 표시
             loading_html = self._get_final_html(title_from_cache, "<body><p>콘텐츠를 불러오는 중입니다...</p></body>", tags_from_cache)
-            self.emitter.show_rich_view.emit(title_from_cache, loading_html)
+            self.emitter.show_rich_view.emit(doc_id, title_from_cache, loading_html, view_mode_info)
 
-        # 백그라운드에서 최신 콘텐츠 동기화
         threading.Thread(target=self.sync_rich_content_thread, args=(doc_id, is_background_check), daemon=True).start()
 
     def sync_rich_content_thread(self, doc_id, is_background_check=False):
         title, html_body, tags = google_api_handler.load_doc_content(doc_id, as_html=True)
-        
+        view_mode_info = self._get_view_mode_info(doc_id)
+
         if title is None: # 404 Not Found
-            # 캐시된 내용을 이미 보여주고 있는 경우, 화면을 덮어쓰지 않고 알림만 표시
-            if is_background_check:
-                print(f"[Sync] 백그라운드 확인 중 문서 없음 확인 (ID: {doc_id}). 캐시를 정리합니다.")
-                self.emitter.toast_notification.emit("문서 없음", "이 메모는 서버에서 삭제된 것 같습니다.")
-            else:
-                # 캐시가 없어서 로딩 화면을 보여주던 경우, "찾을 수 없음" 페이지를 표시
+            if not is_background_check:
                 error_html = self._get_final_html("오류: 문서를 찾을 수 없음", "<body><h2>문서를 찾을 수 없습니다.</h2><p>해당 문서가 삭제되었거나 접근 권한이 없는 것 같습니다.</p></body>", "")
-                self.emitter.show_rich_view.emit("오류: 문서를 찾을 수 없음", error_html)
+                self.emitter.show_rich_view.emit(doc_id, "오류: 문서를 찾을 수 없음", error_html, view_mode_info)
             
-            # 두 경우 모두, 오래된 캐시와 목록을 정리
             self.cleanup_stale_document(doc_id)
             return
 
-        # --- 문서가 정상적으로 로드된 경우 ---
         processed_html_body = self._process_html_images(html_body)
         new_html_full = self._get_final_html(title, processed_html_body, tags)
         
@@ -660,14 +724,12 @@ class AppController:
             except IOError:
                 pass
 
-        # 내용이 변경되었을 경우에만 캐시 파일 업데이트 및 뷰 갱신
         if new_html_full != current_html_full:
             try:
                 with open(cache_path, 'w', encoding='utf-8') as f:
                     f.write(new_html_full)
-                print(f"[Sync] 문서 내용이 변경되어 캐시와 뷰를 업데이트했습니다 (ID: {doc_id})")
                 if self.rich_viewer.isVisible() and self.current_viewing_doc_id == doc_id:
-                    self.emitter.show_rich_view.emit(title, new_html_full)
+                    self.emitter.show_rich_view.emit(doc_id, title, new_html_full, view_mode_info)
             except Exception as e:
                 print(f"콘텐츠 캐시 저장 오류: {e}")
 
@@ -925,6 +987,7 @@ class AppController:
             .tag-link:hover { background-color: #ddeeff; }
         </style>
         """
+        
         final_css = DEFAULT_CSS
         custom_css_path = config_manager.get_setting('Display', 'custom_css_path')
         if custom_css_path and os.path.exists(custom_css_path):
@@ -939,8 +1002,9 @@ class AppController:
     def on_link_activated(self, url):
         url_string = url.toString()
         if url_string.startswith('memo://'):
-            # 사용자 요청: memo:// 링크는 네트워크 확인 없이 로컬 캐시만으로 동작
             doc_id = url_string.replace('memo://', '')
+            print("[Link] 시리즈 캐시를 강제로 재구성합니다.")
+            self.rebuild_series_cache() # 링크 클릭 시 시리즈 캐시를 동기적으로 재구성
             self.view_memo_from_cache_only(doc_id)
         elif url_string.startswith('tag://'):
             tag_name = url_string.replace('tag://', '')
@@ -953,7 +1017,7 @@ class AppController:
             QDesktopServices.openUrl(url)
 
     def view_memo_from_cache_only(self, doc_id):
-        # 네트워크 작업 없이 오직 로컬 캐시만으로 문서를 여는 새로운 함수
+        view_mode_info = self._get_view_mode_info(doc_id)
         cached_info = next((row for row in self.local_cache if row[2] == doc_id), None)
         title = cached_info[0] if cached_info else "캐시된 메모"
 
@@ -966,14 +1030,13 @@ class AppController:
                 
                 self.rich_viewer.update_favorite_status(doc_id in self.favorites)
                 self.current_viewing_doc_id = doc_id
-                self.emitter.show_rich_view.emit(title, cached_html_full)
+                self.emitter.show_rich_view.emit(doc_id, title, cached_html_full, view_mode_info)
             except Exception as e:
                 error_html = self._get_final_html("오류", f"<body><p>캐시 파일을 읽는 중 오류가 발생했습니다: {e}</p></body>", "")
-                self.emitter.show_rich_view.emit("오류", error_html)
+                self.emitter.show_rich_view.emit(doc_id, "오류", error_html, view_mode_info)
         else:
-            # 캐시가 없으면, 캐시가 없다고 명확히 알려줌
             error_html = self._get_final_html("오프라인", "<body><p>이 문서에 대한 로컬 캐시가 없습니다. 목록에서 문서를 열어 동기화해주세요.</p></body>", "")
-            self.emitter.show_rich_view.emit("오프라인", error_html)
+            self.emitter.show_rich_view.emit(doc_id, "오프라인", error_html, view_mode_info)
 
     def edit_tags_from_viewer(self):
         if not self.current_viewing_doc_id:
@@ -1484,3 +1547,161 @@ class AppController:
     def on_graph_node_clicked(self, doc_id):
         self.graph_window.hide()
         self.view_memo_by_id(doc_id)
+
+    def on_viewer_refresh_requested(self, doc_id):
+        print(f"뷰어에서 새로고침 요청: {doc_id}")
+        # 해당 문서의 로컬 콘텐츠 캐시를 삭제
+        cache_path_html = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.html")
+        cache_path_txt = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.txt")
+        if os.path.exists(cache_path_html):
+            try: os.remove(cache_path_html)
+            except OSError as e: print(f"HTML 캐시 삭제 오류: {e}")
+        if os.path.exists(cache_path_txt):
+            try: os.remove(cache_path_txt)
+            except OSError as e: print(f"TXT 캐시 삭제 오류: {e}")
+        
+        # 문서를 다시 로드하여 뷰를 갱신
+        self.view_memo_by_id(doc_id)
+
+    def rebuild_series_cache_if_needed(self):
+        # 앱 시작 시 또는 데이터 동기화 후 호출되어 시리즈 정보를 재구성합니다.
+        print("시리즈 캐시 재구성 시작...")
+        threading.Thread(target=self.rebuild_series_cache, daemon=True).start()
+
+    def rebuild_series_cache(self):
+        print("DEBUG: rebuild_series_cache 시작")
+        new_series_cache = {}
+        title_to_id_map = {row[0]: row[2] for row in self.local_cache if len(row) > 2}
+        print(f"DEBUG: title_to_id_map 생성됨 - {len(title_to_id_map)}개 항목")
+
+        # 1. 모든 MOC 문서를 찾는다.
+        moc_docs = []
+        for row in self.local_cache:
+            if len(row) > 3 and ('#moc' in row[3].lower() or '#시리즈' in row[3].lower()):
+                moc_docs.append({"id": row[2], "title": row[0]})
+        print(f"DEBUG: MOC 문서 {len(moc_docs)}개 발견")
+
+        # 2. 각 MOC에 대해 회차 목록을 파싱한다.
+        for moc in moc_docs:
+            moc_id = moc['id']
+            moc_title = moc['title']
+            print(f"DEBUG: MOC 처리 중 - {moc_title} ({moc_id})")
+            
+            # MOC의 콘텐츠를 가져온다 (캐시 우선, 없으면 API)
+            content = ""
+            cache_path = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{moc_id}.txt")
+            if os.path.exists(cache_path):
+                with open(cache_path, 'r', encoding='utf-8') as f: content = f.read()
+                print(f"DEBUG: 캐시에서 콘텐츠 로드됨 - 길이: {len(content)}")
+            else:
+                _, content, _ = google_api_handler.load_doc_content(moc_id, as_html=False)
+                if content: 
+                    with open(cache_path, 'w', encoding='utf-8') as f: f.write(content)
+                    print(f"DEBUG: API에서 콘텐츠 로드됨 - 길이: {len(content)}")
+
+            if not content:
+                print(f"DEBUG: 콘텐츠 없음, 건너뜀")
+                continue
+
+            # 3. 회차 목록을 기반으로 각 회차의 이전/다음 정보를 계산한다.
+            link_pattern = re.compile(r'\[\[(.*?)\]\]')
+            chapter_titles = link_pattern.findall(content)
+            print(f"DEBUG: 링크 패턴으로 찾은 회차 제목들: {chapter_titles}")
+            
+            chapter_ids = [title_to_id_map.get(title) for title in chapter_titles]
+            chapter_ids = [id for id in chapter_ids if id] # None 값 제거
+            print(f"DEBUG: 매핑된 회차 ID들: {chapter_ids}")
+
+            for i, chapter_id in enumerate(chapter_ids):
+                prev_id = chapter_ids[i-1] if i > 0 else None
+                next_id = chapter_ids[i+1] if i < len(chapter_ids) - 1 else None
+                
+                new_series_cache[chapter_id] = {
+                    "parent_moc_id": moc_id,
+                    "parent_moc_title": moc_title,
+                    "prev_chapter_id": prev_id,
+                    "next_chapter_id": next_id
+                }
+                print(f"DEBUG: 회차 캐시 추가됨 - {chapter_id}: prev={prev_id}, next={next_id}")
+
+        # 4. 완성된 새 캐시를 저장한다.
+        self.series_cache = new_series_cache
+        save_series_cache(self.series_cache)
+        print(f"DEBUG: 시리즈 캐시 재구성 완료. 총 {len(new_series_cache)}개 항목")
+        print(f"DEBUG: 시리즈 캐시 내용: {new_series_cache}")
+
+    def on_add_chapter_requested(self):
+        if not self.current_viewing_doc_id:
+            return
+
+        # 1. 부모 MOC 메모의 정보 가져오기
+        moc_doc_id = self.current_viewing_doc_id
+        moc_info = next((row for row in self.local_cache if row[2] == moc_doc_id), None)
+        if not moc_info:
+            self.emitter.status_update.emit("오류: 현재 MOC 메모 정보를 찾을 수 없습니다.", 4000)
+            return
+        
+        moc_title = moc_info[0]
+
+        # 2. 새 회차의 제목을 사용자에게 입력받기
+        new_chapter_title, ok = QInputDialog.getText(self.rich_viewer, "새 회차 추가", f"'{moc_title}' 시리즈에 추가할 새 회차의 제목을 입력하세요:")
+
+        if ok and new_chapter_title:
+            # 3. 새 메모 생성 및 MOC 업데이트를 백그라운드 스레드에서 실행
+            self.emitter.status_update.emit(f"'{new_chapter_title}' 회차를 추가하는 중...", 0)
+            threading.Thread(target=self.add_chapter_thread, 
+                             args=(moc_doc_id, moc_title, new_chapter_title), 
+                             daemon=True).start()
+
+    # ★★★ 백그라운드에서 실행될 스레드 함수 ★★★
+    def add_chapter_thread(self, moc_doc_id, moc_title, chapter_title):
+        # 1. 새 회차 메모 생성
+        full_new_title = f"{moc_title} - {chapter_title}"
+        initial_content = f"# {chapter_title}\n\n이전 시리즈: [[{moc_title}]]\n\n"
+        
+        moc_tags_text = next((row[3] for row in self.local_cache if row[2] == moc_doc_id), "")
+        inherited_tags = [t for t in moc_tags_text.replace(',', ' ').split() if t.lower() not in ['#moc', '#시리즈']]
+        tags_str = " ".join(inherited_tags)
+        
+        success, new_doc_id = google_api_handler.save_memo(full_new_title, initial_content, tags_str)
+
+        if not success:
+            self.emitter.status_update.emit("새 회차 메모 생성에 실패했습니다.", 5000)
+            return
+
+        # 2. 부모 MOC 문서에 새 회차 링크 추가
+        link_to_add = f"\n- [[{full_new_title}]]"
+        update_success = google_api_handler.append_text_to_doc(moc_doc_id, link_to_add)
+
+        if not update_success:
+            self.emitter.status_update.emit("MOC에 링크를 추가하는 데 실패했습니다.", 5000)
+            return
+            
+        # 3. 로컬 캐시를 즉시 수동으로 업데이트 (레이스 컨디션 방지)
+        from datetime import datetime
+        current_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        new_row = [full_new_title, current_date, new_doc_id, tags_str]
+        self.local_cache.insert(0, new_row)
+        self.update_tags_from_cache()
+
+        # 4. MOC 문서의 로컬 콘텐츠 캐시 삭제
+        moc_cache_path_html = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{moc_doc_id}.html")
+        moc_cache_path_txt = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{moc_doc_id}.txt")
+        if os.path.exists(moc_cache_path_html):
+            try: os.remove(moc_cache_path_html)
+            except OSError as e: print(f"MOC HTML 캐시 삭제 오류: {e}")
+        if os.path.exists(moc_cache_path_txt):
+            try: os.remove(moc_cache_path_txt)
+            except OSError as e: print(f"MOC TXT 캐시 삭제 오류: {e}")
+
+        # 5. UI 업데이트
+        self.emitter.status_update.emit("새 회차가 성공적으로 추가되었습니다.", 3000)
+        if self.rich_viewer.isVisible() and self.current_viewing_doc_id == moc_doc_id:
+            self.view_memo_by_id(moc_doc_id)
+        self.emitter.nav_tree_updated.emit(self.all_tags, self.local_cache)
+        
+        # 6. 백그라운드에서 전체 동기화 실행 (다른 변경사항과의 일관성 유지)
+        self.rebuild_series_cache_if_needed()
+
+        # 7. 새로 생성된 회차의 콘텐츠를 미리 캐싱
+        threading.Thread(target=self.sync_rich_content_thread, args=(new_doc_id, False), daemon=True).start()

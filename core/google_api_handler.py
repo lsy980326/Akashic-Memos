@@ -421,3 +421,31 @@ def check_doc_exists(doc_id):
     except Exception as e:
         print(f"문서 존재 확인 중 알 수 없는 오류 발생 (ID: {doc_id}): {e}")
         return False
+
+def append_text_to_doc(doc_id, text_to_append):
+    """지정된 문서의 맨 끝에 텍스트를 추가합니다."""
+    docs_service, _, _ = get_services()
+    try:
+        # 1. 문서의 현재 끝 인덱스(endIndex)를 가져옵니다.
+        document = docs_service.documents().get(documentId=doc_id, fields='body(content)').execute()
+        end_index = document.get('body').get('content')[-1].get('endIndex')
+
+        # 2. 맨 끝에서 한 칸 뺀 위치에 텍스트를 삽입합니다.
+        # (문서의 마지막에는 항상 개행 문자가 있으므로 그 앞에 삽입)
+        requests = [
+            {
+                'insertText': {
+                    'location': {
+                        'index': end_index - 1,
+                    },
+                    'text': text_to_append
+                }
+            }
+        ]
+        
+        docs_service.documents().batchUpdate(documentId=doc_id, body={'requests': requests}).execute()
+        print(f"문서 {doc_id}에 텍스트를 성공적으로 추가했습니다.")
+        return True
+    except Exception as e:
+        print(f"문서에 텍스트 추가 중 오류 발생: {e}")
+        return False
