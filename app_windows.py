@@ -652,6 +652,7 @@ class MemoListWindow(QWidget):
     context_menu_requested = pyqtSignal(object);
     favorite_toggled_from_list = pyqtSignal(str);
     graph_view_requested = pyqtSignal();
+    memo_selected = pyqtSignal(str);
 
     def __init__(self):
         super().__init__();
@@ -717,15 +718,15 @@ class MemoListWindow(QWidget):
         search_layout.addWidget(self.refresh_button)
         right_layout.addLayout(search_layout)
 
-        # --- 2. 데이터 테이블 ---
-        self.table = QTableWidget()
+        # --- 2. 데이터 테이블 (트리 구조 지원) ---
+        self.table = QTreeWidget()
         self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(['', '제목', '날짜', '태그'])
+        self.table.setHeaderLabels(['', '제목', '날짜', '태그'])
         self.table.setColumnWidth(0, 30)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed) # 첫 번째 열 너비 고정
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch) # 두 번째 열 너비 확장
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers) # 직접 편집 방지
-        self.table.setSortingEnabled(True) # 정렬 기능 활성화
+        self.table.header().setSectionResizeMode(0, QHeaderView.Fixed) # 첫 번째 열 너비 고정
+        self.table.header().setSectionResizeMode(1, QHeaderView.Stretch) # 두 번째 열 너비 확장
+        self.table.setRootIsDecorated(True) # 루트 아이템에 화살표 표시
+        self.table.setAlternatingRowColors(True) # 번갈아가며 색상 표시
         right_layout.addWidget(self.table)
 
         # --- 3. 페이징 컨트롤 ---
@@ -758,7 +759,8 @@ class MemoListWindow(QWidget):
         # 시그널(Signal) / 슬롯(Slot) 연결
         # ===================================================================
         self.nav_tree.currentItemChanged.connect(self.on_nav_selected)
-        self.table.cellClicked.connect(self.on_cell_clicked)
+        self.table.itemClicked.connect(self.on_item_clicked)
+        self.table.itemDoubleClicked.connect(self.on_item_double_clicked)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.context_menu_requested.emit)
 
@@ -811,56 +813,141 @@ class MemoListWindow(QWidget):
                 tag_item.setText(0, f"{tag} ({count})")
             tags_root_item.setExpanded(True)
             
-        self.nav_tree.setCurrentItem(all_memos_item)
+        # 기본 선택은 하지 않음 (show_memo_list_window에서 처리)
         self.nav_tree.blockSignals(False)
 
-    def populate_table(self, data, is_local):
+    def populate_table(self, data, is_local, series_cache=None):
         is_api_result = not is_local
         self.prev_button.setVisible(is_api_result)
         self.next_button.setVisible(is_api_result)
         self.page_label.setVisible(is_api_result)
-        self.table.setSortingEnabled(is_local)
         
-        self.table.clearContents()
-        self.table.setRowCount(len(data))
+        self.table.clear()
         
         favorites = config_manager.get_favorites()
-
-        for i, row in enumerate(data):
+        
+        # 시리즈 캐시가 제공된 경우 사용, 없으면 빈 딕셔너리
+        if series_cache is None:
+            series_cache = {}
+        
+        # MOC 문서들과 일반 문서들을 분리
+        moc_docs = []
+        regular_docs = []
+        
+        for row in data:
             title = row[0] if len(row) > 0 else ""
             date = row[1] if len(row) > 1 else ""
             doc_id = row[2] if len(row) > 2 else ""
             tags = row[3] if len(row) > 3 else ""
-
-            # 즐겨찾기 아이콘 아이템
-            is_favorite = doc_id in favorites
-            fav_item = QTableWidgetItem()
-            icon = qta.icon('fa5s.star', color='#f0c420') if is_favorite else qta.icon('fa5s.star', color='#aaa')
-            fav_item.setIcon(icon)
-            fav_item.setData(Qt.UserRole, doc_id) # 여기에도 doc_id를 저장해두면 유용할 수 있음
-
-            title_item = QTableWidgetItem(title)
-            date_item = QTableWidgetItem(date)
-            tags_item = QTableWidgetItem(tags)
             
-            # 모든 아이템에 doc_id 저장
-            title_item.setData(Qt.UserRole, doc_id)
-            date_item.setData(Qt.UserRole, doc_id)
-            tags_item.setData(Qt.UserRole, doc_id)
-
-            self.table.setItem(i, 0, fav_item)
-            self.table.setItem(i, 1, title_item)
-            self.table.setItem(i, 2, date_item)
-            self.table.setItem(i, 3, tags_item)
+            # MOC 문서인지 확인
+            if tags and '#moc' in tags.lower():
+                moc_docs.append(row)
+            else:
+                regular_docs.append(row)
+        
+        # MOC 문서들을 먼저 추가하고 하위 회차들을 연결
+        for moc_row in moc_docs:
+            title = moc_row[0] if len(moc_row) > 0 else ""
+            date = moc_row[1] if len(moc_row) > 1 else ""
+            doc_id = moc_row[2] if len(moc_row) > 2 else ""
+            tags = moc_row[3] if len(moc_row) > 3 else ""
+            
+            # MOC 아이템 생성
+            moc_item = QTreeWidgetItem()
+            moc_item.setText(1, f"📚 {title}")  # MOC 아이콘 추가
+            moc_item.setText(2, date)
+            moc_item.setText(3, tags)
+            moc_item.setData(0, Qt.UserRole, doc_id)
+            moc_item.setData(1, Qt.UserRole, doc_id)
+            moc_item.setData(2, Qt.UserRole, doc_id)
+            moc_item.setData(3, Qt.UserRole, doc_id)
+            
+            # 즐겨찾기 아이콘 설정
+            is_favorite = doc_id in favorites
+            icon = qta.icon('fa5s.star', color='#f0c420') if is_favorite else qta.icon('fa5s.star', color='#aaa')
+            moc_item.setIcon(0, icon)
+            
+            # MOC 아이템을 트리에 추가
+            self.table.addTopLevelItem(moc_item)
+            
+            # 시리즈 캐시에서 이 MOC의 회차들을 찾아서 하위 아이템으로 추가
+            for chapter_doc_id, chapter_info in series_cache.items():
+                if chapter_info.get('parent_moc_id') == doc_id:
+                    # 해당 회차의 정보를 regular_docs에서 찾기
+                    chapter_row = None
+                    for row in regular_docs:
+                        if len(row) > 2 and row[2] == chapter_doc_id:
+                            chapter_row = row
+                            break
+                    
+                    if chapter_row:
+                        chapter_title = chapter_row[0] if len(chapter_row) > 0 else ""
+                        chapter_date = chapter_row[1] if len(chapter_row) > 1 else ""
+                        chapter_tags = chapter_row[3] if len(chapter_row) > 3 else ""
+                        
+                        # 회차 아이템 생성
+                        chapter_item = QTreeWidgetItem()
+                        chapter_item.setText(1, f"  📄 {chapter_title}")  # 회차 아이콘과 들여쓰기
+                        chapter_item.setText(2, chapter_date)
+                        chapter_item.setText(3, chapter_tags)
+                        chapter_item.setData(0, Qt.UserRole, chapter_doc_id)
+                        chapter_item.setData(1, Qt.UserRole, chapter_doc_id)
+                        chapter_item.setData(2, Qt.UserRole, chapter_doc_id)
+                        chapter_item.setData(3, Qt.UserRole, chapter_doc_id)
+                        
+                        # 회차 즐겨찾기 아이콘
+                        is_chapter_favorite = chapter_doc_id in favorites
+                        chapter_icon = qta.icon('fa5s.star', color='#f0c420') if is_chapter_favorite else qta.icon('fa5s.star', color='#aaa')
+                        chapter_item.setIcon(0, chapter_icon)
+                        
+                        moc_item.addChild(chapter_item)
+        
+        # 시리즈에 속하지 않은 일반 문서들 추가
+        for row in regular_docs:
+            doc_id = row[2] if len(row) > 2 else ""
+            
+            # 이미 시리즈에 포함된 문서인지 확인
+            is_chapter = any(chapter_info.get('parent_moc_id') for chapter_info in series_cache.values() if chapter_info.get('parent_moc_id'))
+            is_chapter = is_chapter and doc_id in series_cache
+            
+            if not is_chapter:
+                title = row[0] if len(row) > 0 else ""
+                date = row[1] if len(row) > 1 else ""
+                tags = row[3] if len(row) > 3 else ""
+                
+                # 일반 문서 아이템 생성
+                doc_item = QTreeWidgetItem()
+                doc_item.setText(1, f"📄 {title}")
+                doc_item.setText(2, date)
+                doc_item.setText(3, tags)
+                doc_item.setData(0, Qt.UserRole, doc_id)
+                doc_item.setData(1, Qt.UserRole, doc_id)
+                doc_item.setData(2, Qt.UserRole, doc_id)
+                doc_item.setData(3, Qt.UserRole, doc_id)
+                
+                # 즐겨찾기 아이콘
+                is_favorite = doc_id in favorites
+                icon = qta.icon('fa5s.star', color='#f0c420') if is_favorite else qta.icon('fa5s.star', color='#aaa')
+                doc_item.setIcon(0, icon)
+                
+                self.table.addTopLevelItem(doc_item)
     
     def update_paging_buttons(self, prev_enabled, next_enabled, page_num):
         self.prev_button.setEnabled(prev_enabled); self.next_button.setEnabled(next_enabled); self.page_label.setText(f"{page_num} 페이지")
     
-    def on_cell_clicked(self, row, column):
+    def on_item_clicked(self, item, column):
         if column == 0: # 0번 열(즐겨찾기 아이콘)이 클릭되었을 때
-            doc_id = self.table.item(row, 1).data(Qt.UserRole)
+            doc_id = item.data(0, Qt.UserRole)
             if doc_id:
                 self.favorite_toggled_from_list.emit(doc_id)
+    
+    def on_item_double_clicked(self, item, column):
+        # 더블클릭 시 해당 문서 열기
+        doc_id = item.data(0, Qt.UserRole)
+        if doc_id:
+            # 시그널을 통해 컨트롤러에 알림
+            self.memo_selected.emit(doc_id)
 
     def closeEvent(self, event):
         geometry_hex = self.saveGeometry().toHex().data().decode('utf-8')

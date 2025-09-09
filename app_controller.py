@@ -41,7 +41,7 @@ class SignalEmitter(QObject):
     show_quick_launcher = pyqtSignal()
     show_edit_memo = pyqtSignal(str, str, str, str)
     show_rich_view = pyqtSignal(str, str, str, dict)
-    list_data_loaded = pyqtSignal(list, bool)
+    list_data_loaded = pyqtSignal(list, bool, dict)
     nav_tree_updated = pyqtSignal(set, list)
     status_update = pyqtSignal(str, int)
     persistent_notification = pyqtSignal(str, str, str)  # For persistent notifications like deadlines
@@ -155,6 +155,7 @@ class AppController:
         self.memo_list.search_bar.textChanged.connect(self.on_search_text_changed)
         self.memo_list.full_text_search_check.stateChanged.connect(self.search_mode_changed)
         self.memo_list.table.itemDoubleClicked.connect(self.view_memo_from_item)
+        self.memo_list.memo_selected.connect(self.view_memo_by_id)
         self.memo_list.table.customContextMenuRequested.connect(self.show_context_menu)
         self.memo_list.prev_button.clicked.connect(self.go_to_prev_page)
         self.memo_list.next_button.clicked.connect(self.go_to_next_page)
@@ -281,10 +282,25 @@ class AppController:
                 self.quick_launcher.update_results(results)
 
     def on_sync_finished_update_list(self):
+        print("DEBUG: on_sync_finished_update_list 호출됨")
         if self.memo_list.isVisible() and not self.memo_list.full_text_search_check.isChecked():
+            print("DEBUG: memo_list가 보이고 전체 텍스트 검색이 아님")
             current_nav_item = self.memo_list.nav_tree.currentItem()
             if current_nav_item:
-                self.on_navigation_selected(current_nav_item.text(0))
+                nav_text = current_nav_item.text(0)
+                nav_id = current_nav_item.data(0, Qt.UserRole)
+                print(f"DEBUG: 현재 네비게이션 아이템: {nav_text} (ID: {nav_id})")
+                
+                # ID가 있으면 ID로, 없으면 텍스트로 네비게이션 실행
+                if nav_id:
+                    self.on_navigation_selected(nav_id)
+                else:
+                    self.on_navigation_selected(nav_text)
+            else:
+                print("DEBUG: 현재 네비게이션 아이템이 없음, 전체 메모로 설정")
+                self.on_navigation_selected("전체 메모")
+        else:
+            print("DEBUG: memo_list가 보이지 않거나 전체 텍스트 검색 중")
 
     def start_initial_sync(self):
         self.emitter.status_update.emit("최신 정보 동기화 중...", 2000)
@@ -309,7 +325,22 @@ class AppController:
 
         with self.cache_lock:
             if validated_data != self.local_cache:
-                self.local_cache = validated_data
+                print(f"DEBUG: sync_cache_thread - local_cache 변경됨: {len(self.local_cache)} -> {len(validated_data)}")
+                
+                # 새로 추가된 항목들을 보존하기 위해 기존 local_cache의 ID들을 확인
+                existing_ids = {row[2] for row in self.local_cache if len(row) > 2}
+                validated_ids = {row[2] for row in validated_data if len(row) > 2}
+                
+                # 기존에 있던 항목들 중에서 validated_data에 없는 항목들 (새로 추가된 항목들)
+                new_items = [row for row in self.local_cache if len(row) > 2 and row[2] not in validated_ids]
+                
+                if new_items:
+                    print(f"DEBUG: 새로 추가된 항목 {len(new_items)}개 보존: {[row[0] for row in new_items]}")
+                    # 새로 추가된 항목들을 validated_data 앞에 추가
+                    self.local_cache = new_items + validated_data
+                else:
+                    self.local_cache = validated_data
+                
                 self.update_tags_from_cache()
                 try:
                     with open(config_manager.CACHE_FILE, 'w', encoding='utf-8') as f:
@@ -322,6 +353,7 @@ class AppController:
                 self.emitter.status_update.emit("동기화 완료.", 5000)
                 self.rebuild_series_cache_if_needed() # 시리즈 캐시 업데이트
             else:
+                print("DEBUG: sync_cache_thread - local_cache 변경 없음")
                 self.emitter.status_update.emit("이미 최신 상태입니다.", 3000)
 
     def load_cache_only(self, initial_load=False):
@@ -331,7 +363,8 @@ class AppController:
                     self.local_cache = json.load(f)
                 self.update_tags_from_cache()
                 if initial_load:
-                    self.emitter.list_data_loaded.emit(self.local_cache, True)
+                    series_cache = self.series_cache if hasattr(self, 'series_cache') else {}
+                    self.emitter.list_data_loaded.emit(self.local_cache, True, series_cache)
                     self.emitter.nav_tree_updated.emit(self.all_tags, self.local_cache)
         except Exception as e:
             print(f"캐시 로딩 실패: {e}")
@@ -350,24 +383,27 @@ class AppController:
         self.memo_list.search_bar.clear()
         self.memo_list.full_text_search_check.setChecked(False)
 
+        # 시리즈 캐시 가져오기
+        series_cache = self.series_cache if hasattr(self, 'series_cache') else {}
+        
         # id가 favorites이면 즐겨찾기 목록을 표시
         if selected_item_id == "favorites":
             fav_memos = [row for row in self.local_cache if len(row) > 2 and row[2] in self.favorites]
-            self.emitter.list_data_loaded.emit(fav_memos, True)
+            self.emitter.list_data_loaded.emit(fav_memos, True, series_cache)
             return
 
         # "태그 (12)" 와 같은 형식에서 텍스트 부분만 추출
         clean_selected_item = re.sub(r'\s*\(\d+\)', '', selected_item_id).strip()
 
         if clean_selected_item == "전체 메모":
-            self.emitter.list_data_loaded.emit(self.local_cache, True)
+            self.emitter.list_data_loaded.emit(self.local_cache, True, series_cache)
         elif clean_selected_item not in ["태그", ""]:
             # 선택된 태그를 포함하는 메모만 필터링
             filtered_data = [
                 row for row in self.local_cache
                 if len(row) > 3 and row[3] and clean_selected_item in [tag.strip().lstrip('#') for tag in row[3].replace(',', ' ').split()]
             ]
-            self.emitter.list_data_loaded.emit(filtered_data, True)
+            self.emitter.list_data_loaded.emit(filtered_data, True, series_cache)
 
     def on_editor_text_changed(self):
         self.emitter.auto_save_status_update.emit("변경사항이 있습니다...")
@@ -395,6 +431,15 @@ class AppController:
         if geometry_hex:
             self.memo_list.restoreGeometry(QByteArray.fromHex(geometry_hex.encode('utf-8')))
 
+        # 현재 선택된 네비게이션 아이템을 기억
+        current_nav_item = None
+        if hasattr(self, 'memo_list') and self.memo_list.isVisible():
+            current_nav_item = self.memo_list.nav_tree.currentItem()
+            if current_nav_item:
+                current_nav_text = current_nav_item.text(0)
+                current_nav_id = current_nav_item.data(0, Qt.UserRole)
+                print(f"DEBUG: 현재 선택된 네비게이션 아이템 기억: {current_nav_text} (ID: {current_nav_id})")
+
         self.memo_list.show()
         self.memo_list.activateWindow()
         self.memo_list.raise_()
@@ -404,15 +449,45 @@ class AppController:
         # 네비게이션 트리 업데이트
         self.memo_list.update_nav_tree(self.all_tags, self.local_cache)
 
-        current_nav = self.memo_list.nav_tree.currentItem()
-        if current_nav:
-            self.on_navigation_selected(current_nav.text(0))
+        # 이전에 선택된 아이템이 있으면 복원
+        if current_nav_item:
+            current_nav_text = current_nav_item.text(0)
+            current_nav_id = current_nav_item.data(0, Qt.UserRole)
+            
+            # 같은 텍스트나 ID를 가진 아이템을 찾아서 선택
+            restored = False
+            if current_nav_id:
+                # ID로 찾기 (즐겨찾기, 태그 등)
+                items = self.memo_list.nav_tree.findItems(current_nav_text, Qt.MatchFixedString | Qt.MatchRecursive, 0)
+                for item in items:
+                    if item.data(0, Qt.UserRole) == current_nav_id:
+                        self.memo_list.nav_tree.setCurrentItem(item)
+                        # 네비게이션 선택 이벤트는 자동으로 발생
+                        print(f"DEBUG: 네비게이션 아이템 복원됨 (ID로): {current_nav_text}")
+                        restored = True
+                        break
+            else:
+                # 텍스트로 찾기 (전체 메모 등)
+                items = self.memo_list.nav_tree.findItems(current_nav_text, Qt.MatchFixedString | Qt.MatchRecursive, 0)
+                if items:
+                    self.memo_list.nav_tree.setCurrentItem(items[0])
+                    # 네비게이션 선택 이벤트는 자동으로 발생
+                    print(f"DEBUG: 네비게이션 아이템 복원됨 (텍스트로): {current_nav_text}")
+                    restored = True
+            
+            if not restored:
+                print(f"DEBUG: 네비게이션 아이템 복원 실패, 기본값으로 설정")
+                # 복원 실패 시 기본값으로 설정
+                all_memos_item = self.memo_list.nav_tree.findItems("전체 메모", Qt.MatchFixedString | Qt.MatchRecursive, 0)
+                if all_memos_item:
+                    self.memo_list.nav_tree.setCurrentItem(all_memos_item[0])
+                # 네비게이션 선택 이벤트는 자동으로 발생
         else:
-            # 기본값으로 '전체 메모' 선택
+            # 이전 선택이 없으면 기본값으로 '전체 메모' 선택
             all_memos_item = self.memo_list.nav_tree.findItems("전체 메모", Qt.MatchFixedString | Qt.MatchRecursive, 0)
             if all_memos_item:
                 self.memo_list.nav_tree.setCurrentItem(all_memos_item[0])
-            self.on_navigation_selected("전체 메모")
+            # 네비게이션 선택 이벤트는 자동으로 발생
 
 
     def on_search_text_changed(self):
@@ -426,7 +501,8 @@ class AppController:
         self.memo_list.search_bar.setPlaceholderText("본문 내용으로 검색..." if is_full_text else "제목으로 실시간 필터링...")
         
         if is_full_text:
-            self.emitter.list_data_loaded.emit([], False)
+            series_cache = self.series_cache if hasattr(self, 'series_cache') else {}
+            self.emitter.list_data_loaded.emit([], False, series_cache)
             self.memo_list.update_paging_buttons(False, False, 1)
             self.perform_search()
         else:
@@ -456,13 +532,15 @@ class AppController:
         else:
             filtered_data = base_data
             
-        self.emitter.list_data_loaded.emit(filtered_data, True)
+        series_cache = self.series_cache if hasattr(self, 'series_cache') else {}
+        self.emitter.list_data_loaded.emit(filtered_data, True, series_cache)
 
 
     def perform_search(self, page_token=None, is_prev=False, is_next=False):
         query = self.memo_list.search_bar.text()
         if not query:
-            self.emitter.list_data_loaded.emit([], False)
+            series_cache = self.series_cache if hasattr(self, 'series_cache') else {}
+            self.emitter.list_data_loaded.emit([], False, series_cache)
             self.memo_list.update_paging_buttons(False, False, 1)
             self.emitter.status_update.emit("검색어를 입력하세요.", 3000)
             return
@@ -478,7 +556,8 @@ class AppController:
     def fetch_data_api(self, query, page_token):
         data, next_token = google_api_handler.search_memos_by_content(query, page_token)
         self.next_page_token = next_token
-        self.emitter.list_data_loaded.emit(data if data else [], False)
+        series_cache = self.series_cache if hasattr(self, 'series_cache') else {}
+        self.emitter.list_data_loaded.emit(data if data else [], False, series_cache)
         prev_enabled = len(self.prev_page_tokens) > 0
         page_num = len(self.prev_page_tokens) + 1
         self.memo_list.update_paging_buttons(prev_enabled, self.next_page_token is not None, page_num)
@@ -667,11 +746,23 @@ class AppController:
         return result
 
     def view_memo_from_item(self, item):
-        doc_id = item.data(Qt.UserRole)
-        self.view_memo_by_id(doc_id)
+        # QTreeWidgetItem인 경우와 QTableWidgetItem인 경우 모두 처리
+        try:
+            # QTreeWidgetItem인 경우 (column, role 순서)
+            doc_id = item.data(0, Qt.UserRole)
+        except (TypeError, AttributeError):
+            try:
+                # QTableWidgetItem인 경우 (role만)
+                doc_id = item.data(Qt.UserRole)
+            except (TypeError, AttributeError):
+                print(f"DEBUG: view_memo_from_item - 아이템 타입을 확인할 수 없음: {type(item)}")
+                return
+        
+        if doc_id:
+            self.view_memo_by_id(doc_id)
 
-    def view_memo_by_id(self, doc_id):
-        if self.rich_viewer.isVisible() and self.current_viewing_doc_id == doc_id:
+    def view_memo_by_id(self, doc_id, force_refresh=False):
+        if self.rich_viewer.isVisible() and self.current_viewing_doc_id == doc_id and not force_refresh:
             self.rich_viewer.activateWindow()
             return
 
@@ -685,7 +776,13 @@ class AppController:
 
         cache_path = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.html")
         is_background_check = False
-        if os.path.exists(cache_path):
+        
+        # 강제 새로고침이거나 캐시가 없는 경우
+        if force_refresh or not os.path.exists(cache_path):
+            loading_html = self._get_final_html(title_from_cache, "<body><p>콘텐츠를 불러오는 중입니다...</p></body>", tags_from_cache)
+            self.emitter.show_rich_view.emit(doc_id, title_from_cache, loading_html, view_mode_info)
+        else:
+            # 캐시가 있는 경우
             try:
                 with open(cache_path, 'r', encoding='utf-8') as f:
                     cached_html_full = f.read()
@@ -694,9 +791,6 @@ class AppController:
             except Exception:
                 error_html = self._get_final_html("오류", "<body><p>캐시 파일을 읽을 수 없습니다.</p></body>", "")
                 self.emitter.show_rich_view.emit(doc_id, "오류", error_html, view_mode_info)
-        else:
-            loading_html = self._get_final_html(title_from_cache, "<body><p>콘텐츠를 불러오는 중입니다...</p></body>", tags_from_cache)
-            self.emitter.show_rich_view.emit(doc_id, title_from_cache, loading_html, view_mode_info)
 
         threading.Thread(target=self.sync_rich_content_thread, args=(doc_id, is_background_check), daemon=True).start()
 
@@ -821,13 +915,35 @@ class AppController:
     
     def delete_memo_thread(self, doc_id):
         self.emitter.status_update.emit("삭제 중...", 0)
+        
+        # 삭제할 메모의 정보를 먼저 가져옴
+        deleted_memo_info = next((row for row in self.local_cache if row[2] == doc_id), None)
+        deleted_title = deleted_memo_info[0] if deleted_memo_info else "알 수 없는 메모"
+        
         success = google_api_handler.delete_memo(doc_id)
         if success:
             # 로컬 캐시에서 해당 메모 제거
             self.local_cache = [row for row in self.local_cache if len(row) > 2 and row[2] != doc_id]
+            
+            # 시리즈 문서인 경우 MOC 문서에서 링크 제거
+            if deleted_memo_info and len(deleted_memo_info) > 3:
+                tags = deleted_memo_info[3]
+                # 시리즈 문서인지 확인 (#moc 태그가 없고, 시리즈 관련 태그가 있는 경우)
+                if tags and '#moc' not in tags.lower() and any(tag.lower() in ['#시리즈', '#series'] for tag in tags.split()):
+                    print(f"DEBUG: 시리즈 문서 삭제됨 - {deleted_title}")
+                    self.remove_chapter_from_moc_documents(doc_id, deleted_title)
+                else:
+                    # 시리즈 캐시에 있는지 확인 (태그로 판단이 안 되는 경우)
+                    if doc_id in self.series_cache:
+                        print(f"DEBUG: 시리즈 캐시에서 발견된 문서 삭제됨 - {deleted_title}")
+                        self.remove_chapter_from_moc_documents(doc_id, deleted_title)
+                    else:
+                        print(f"DEBUG: 일반 문서로 판단됨 - {deleted_title}")
+            
             # 캐시 파일에 변경사항 저장
             with open(config_manager.CACHE_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.local_cache, f, ensure_ascii=False, indent=4)
+            
             # 태그 목록 업데이트 및 UI 갱신
             self.update_tags_from_cache()
             self.emitter.nav_tree_updated.emit(self.all_tags, self.local_cache)
@@ -837,6 +953,201 @@ class AppController:
         else:
             self.emitter.status_update.emit("삭제 실패", 5000)
             self.emitter.toast_notification.emit("삭제 실패", f"메모 삭제에 실패했습니다.")
+
+    def remove_chapter_from_moc_documents(self, deleted_doc_id, deleted_title):
+        """삭제된 시리즈 문서를 참조하는 MOC 문서들에서 링크를 제거"""
+        try:
+            print(f"DEBUG: MOC 문서에서 시리즈 링크 제거 시작 - {deleted_title}")
+            
+            # 시리즈 캐시에서 삭제된 문서의 부모 MOC 찾기
+            if deleted_doc_id in self.series_cache:
+                parent_moc_id = self.series_cache[deleted_doc_id].get('parent_moc_id')
+                if parent_moc_id:
+                    print(f"DEBUG: 부모 MOC 문서에서 링크 제거: {parent_moc_id}")
+                    self.remove_chapter_link_from_moc(parent_moc_id, deleted_title)
+                    
+                    # 시리즈 캐시에서도 제거
+                    del self.series_cache[deleted_doc_id]
+                    print(f"DEBUG: 시리즈 캐시에서 제거됨: {deleted_doc_id}")
+                    
+                    # 이전/다음 회차 연결 업데이트
+                    self.update_adjacent_chapters(deleted_doc_id)
+            else:
+                print(f"DEBUG: 시리즈 캐시에서 삭제된 문서를 찾을 수 없음, 모든 MOC 문서에서 검색: {deleted_doc_id}")
+                # 시리즈 캐시에 없어도 모든 MOC 문서에서 해당 링크를 찾아서 제거
+                self.search_and_remove_from_all_mocs(deleted_title)
+                
+        except Exception as e:
+            print(f"DEBUG: MOC 문서에서 시리즈 링크 제거 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def remove_chapter_link_from_moc(self, moc_doc_id, deleted_title):
+        """특정 MOC 문서에서 삭제된 시리즈 문서의 링크를 제거"""
+        try:
+            # MOC 문서의 현재 내용을 가져옴
+            title, html_body, tags_text = google_api_handler.load_doc_content(moc_doc_id, as_html=False)
+            if not title or not html_body:
+                print(f"DEBUG: MOC 문서 내용을 가져올 수 없음: {moc_doc_id}")
+                return
+            
+            # 삭제할 링크 패턴 찾기 (- [[제목]] 형태)
+            import re
+            print(f"DEBUG: 삭제할 제목: '{deleted_title}'")
+            print(f"DEBUG: 문서 내용 일부: {html_body[:500]}...")
+            
+            # 여러 가지 패턴을 시도 (줄 시작에 -, 공백, 탭 등이 있을 수 있음)
+            link_patterns = [
+                rf'^\s*-\s*\[\[{re.escape(deleted_title)}\]\]\s*$',  # - [[제목]] 형태
+                rf'^\s*\[\[{re.escape(deleted_title)}\]\]\s*$',      # [[제목]] 형태
+                rf'\[\[{re.escape(deleted_title)}\]\]'               # 일반적인 [[제목]] 형태
+            ]
+            
+            # 각 패턴을 테스트해보기
+            for i, pattern in enumerate(link_patterns):
+                matches = re.findall(pattern, html_body, re.MULTILINE)
+                print(f"DEBUG: 패턴 {i+1} 매치 결과: {matches}")
+            
+            # 링크가 있는지 확인 (문자열 검색 사용)
+            link_pattern = f"[[{deleted_title}]]"
+            link_found = link_pattern in html_body
+            print(f"DEBUG: 링크 패턴 '{link_pattern}' 검색 결과: {link_found}")
+            
+            if link_found:
+                # 링크가 포함된 줄을 찾아서 제거
+                lines = html_body.split('\n')
+                updated_lines = []
+                
+                for line in lines:
+                    # 해당 줄에 삭제할 링크가 있는지 확인
+                    if link_pattern in line:
+                        # 해당 줄 전체를 제거 (링크가 포함된 줄)
+                        print(f"DEBUG: 줄 전체 제거됨: {line.strip()}")
+                        # updated_lines에 추가하지 않음 (줄 제거)
+                    else:
+                        updated_lines.append(line)
+                
+                # 업데이트된 내용으로 MOC 문서 수정
+                updated_content = '\n'.join(updated_lines)
+                if updated_content != html_body:
+                    # Google Docs에서 문서 내용 교체
+                    success = self.update_moc_document_content(moc_doc_id, updated_content)
+                    if success:
+                        print(f"DEBUG: MOC 문서 업데이트 완료: {moc_doc_id}")
+                        # MOC 문서 캐시 삭제하여 다음에 열 때 최신 내용이 보이도록 함
+                        self.clear_moc_cache(moc_doc_id)
+                    else:
+                        print(f"DEBUG: MOC 문서 업데이트 실패: {moc_doc_id}")
+                else:
+                    print(f"DEBUG: MOC 문서에 변경사항 없음: {moc_doc_id}")
+            else:
+                print(f"DEBUG: MOC 문서에서 삭제할 링크를 찾을 수 없음: {deleted_title}")
+                
+        except Exception as e:
+            print(f"DEBUG: MOC 문서에서 링크 제거 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def update_moc_document_content(self, doc_id, new_content):
+        """MOC 문서의 내용을 새로운 내용으로 교체"""
+        try:
+            docs_service, _, _ = google_api_handler.get_services()
+            
+            # 문서의 현재 끝 인덱스 가져오기
+            doc = docs_service.documents().get(documentId=doc_id, fields='body(content)').execute()
+            end_index = doc.get('body').get('content')[-1].get('endIndex')
+            
+            # 기존 내용 삭제 (제목 제외)
+            requests = []
+            if end_index > 1:
+                requests.append({
+                    'deleteContentRange': {
+                        'range': {
+                            'startIndex': 1,
+                            'endIndex': end_index - 1
+                        }
+                    }
+                })
+            
+            # 새 내용 삽입
+            if new_content.strip():
+                requests.append({
+                    'insertText': {
+                        'location': {'index': 1},
+                        'text': new_content
+                    }
+                })
+            
+            if requests:
+                docs_service.documents().batchUpdate(documentId=doc_id, body={'requests': requests}).execute()
+                return True
+            return False
+            
+        except Exception as e:
+            print(f"DEBUG: MOC 문서 내용 업데이트 중 오류: {e}")
+            return False
+
+    def clear_moc_cache(self, moc_doc_id):
+        """MOC 문서의 캐시를 삭제"""
+        try:
+            cache_path_html = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{moc_doc_id}.html")
+            cache_path_txt = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{moc_doc_id}.txt")
+            
+            if os.path.exists(cache_path_html):
+                os.remove(cache_path_html)
+                print(f"DEBUG: MOC HTML 캐시 삭제: {cache_path_html}")
+            if os.path.exists(cache_path_txt):
+                os.remove(cache_path_txt)
+                print(f"DEBUG: MOC TXT 캐시 삭제: {cache_path_txt}")
+                
+        except Exception as e:
+            print(f"DEBUG: MOC 캐시 삭제 중 오류: {e}")
+
+    def update_adjacent_chapters(self, deleted_doc_id):
+        """삭제된 회차의 이전/다음 회차 연결을 업데이트"""
+        try:
+            if deleted_doc_id not in self.series_cache:
+                return
+                
+            deleted_info = self.series_cache[deleted_doc_id]
+            prev_id = deleted_info.get('prev_chapter_id')
+            next_id = deleted_info.get('next_chapter_id')
+            
+            # 이전 회차의 next_chapter_id를 다음 회차로 변경
+            if prev_id and prev_id in self.series_cache:
+                self.series_cache[prev_id]['next_chapter_id'] = next_id
+                print(f"DEBUG: 이전 회차 연결 업데이트: {prev_id} -> {next_id}")
+            
+            # 다음 회차의 prev_chapter_id를 이전 회차로 변경
+            if next_id and next_id in self.series_cache:
+                self.series_cache[next_id]['prev_chapter_id'] = prev_id
+                print(f"DEBUG: 다음 회차 연결 업데이트: {next_id} -> {prev_id}")
+                
+        except Exception as e:
+            print(f"DEBUG: 인접 회차 연결 업데이트 중 오류: {e}")
+
+    def search_and_remove_from_all_mocs(self, deleted_title):
+        """모든 MOC 문서에서 삭제된 시리즈 문서의 링크를 찾아서 제거"""
+        try:
+            print(f"DEBUG: 모든 MOC 문서에서 '{deleted_title}' 검색 시작")
+            
+            # 로컬 캐시에서 MOC 문서들 찾기 (#moc 태그가 있는 문서들)
+            moc_documents = []
+            for row in self.local_cache:
+                if len(row) > 3 and row[3] and '#moc' in row[3].lower():
+                    moc_documents.append((row[2], row[0]))  # (doc_id, title)
+            
+            print(f"DEBUG: 발견된 MOC 문서 {len(moc_documents)}개: {[title for _, title in moc_documents]}")
+            
+            # 각 MOC 문서에서 링크 검색 및 제거
+            for moc_doc_id, moc_title in moc_documents:
+                print(f"DEBUG: MOC 문서 검색 중: {moc_title} ({moc_doc_id})")
+                self.remove_chapter_link_from_moc(moc_doc_id, deleted_title)
+                
+        except Exception as e:
+            print(f"DEBUG: 모든 MOC 문서에서 검색 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
 
     def show_context_menu(self, pos):
         item = self.memo_list.table.itemAt(pos)
@@ -929,6 +1240,22 @@ class AppController:
                 return f'<a href="memo://{doc_id}" title="메모 열기: {linked_title}">{linked_title}</a>'
             return f'<span class="broken-link" title="존재하지 않는 메모: {linked_title}">[[{linked_title}]]</span>'
         
+        def convert_local_images(html):
+            """로컬 이미지 경로를 절대 경로로 변환"""
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, 'html.parser')
+            for img in soup.find_all('img'):
+                src = img.get('src')
+                if src and not src.startswith(('http://', 'https://', 'file://')):
+                    # 상대 경로인 경우 절대 경로로 변환
+                    if src.startswith('resources/'):
+                        abs_path = os.path.abspath(resource_path(src))
+                        img['src'] = f"file:///{abs_path.replace(os.sep, '/')}"
+                    elif src.startswith('./') or src.startswith('../'):
+                        abs_path = os.path.abspath(os.path.join(os.getcwd(), src))
+                        img['src'] = f"file:///{abs_path.replace(os.sep, '/')}"
+            return str(soup)
+        
         def style_checkboxes(html):
             # 완료되지 않은 체크박스
             html = re.sub(r'<li>\[ \]', r'<li><span class="task-checkbox-empty"></span>', html)
@@ -946,7 +1273,10 @@ class AppController:
             html = re.sub(r'\s(@\S+)', r'<span class="date-tag">\1</span>', html)
             return html
 
-        parsed_body = re.sub(r'\[\[(.*?)\]\]', replace_wiki_links, html_body)
+        # 이미지 경로 변환 먼저 적용
+        processed_html = convert_local_images(html_body)
+        # 위키 링크 변환 적용
+        parsed_body = re.sub(r'\[\[(.*?)\]\]', replace_wiki_links, processed_html)
         parsed_body = style_checkboxes(parsed_body)
         parsed_body = style_priority_tags(parsed_body)
         parsed_body = style_todotime_tags(parsed_body)
@@ -1563,6 +1893,131 @@ class AppController:
         # 문서를 다시 로드하여 뷰를 갱신
         self.view_memo_by_id(doc_id)
 
+    def refresh_document_content(self, doc_id):
+        """문서 콘텐츠를 새로고침하는 백그라운드 함수"""
+        try:
+            print(f"DEBUG: refresh_document_content 시작 - doc_id: {doc_id}")
+            
+            # 로딩 상태 표시
+            loading_html = self._get_final_html("새로고침 중...", "<body><p>콘텐츠를 새로고침하는 중입니다...</p></body>", "")
+            view_mode_info = self._get_view_mode_info(doc_id)
+            self.emitter.show_rich_view.emit(doc_id, "새로고침 중...", loading_html, view_mode_info)
+            
+            # 추가로 캐시 파일이 남아있으면 강제 삭제
+            cache_path_html = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.html")
+            cache_path_txt = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.txt")
+            if os.path.exists(cache_path_html):
+                try:
+                    os.remove(cache_path_html)
+                    print(f"DEBUG: 추가 캐시 삭제 완료: {cache_path_html}")
+                except OSError as e:
+                    print(f"DEBUG: 추가 캐시 삭제 오류: {e}")
+            if os.path.exists(cache_path_txt):
+                try:
+                    os.remove(cache_path_txt)
+                    print(f"DEBUG: 추가 캐시 삭제 완료: {cache_path_txt}")
+                except OSError as e:
+                    print(f"DEBUG: 추가 캐시 삭제 오류: {e}")
+            
+            # Google Drive에서 최신 콘텐츠 가져오기
+            title, html_body, tags_text = google_api_handler.load_doc_content(doc_id, as_html=True)
+            
+            if title and html_body is not None:
+                # 최종 HTML 생성
+                final_html = self._get_final_html(title, html_body, tags_text)
+                view_mode_info = self._get_view_mode_info(doc_id)
+                
+                # UI 업데이트
+                self.emitter.show_rich_view.emit(doc_id, title, final_html, view_mode_info)
+                print(f"DEBUG: 문서 {doc_id} 새로고침 완료 - 제목: {title}")
+            else:
+                print(f"DEBUG: 문서 {doc_id} 새로고침 실패 - title: {title}, html_body: {html_body is not None}")
+        except Exception as e:
+            print(f"DEBUG: 문서 {doc_id} 새로고침 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def update_memo_list_table(self):
+        """현재 선택된 네비게이션에 따라 문서 목록 테이블을 업데이트"""
+        try:
+            if not hasattr(self, 'memo_list') or not self.memo_list.isVisible():
+                print("DEBUG: memo_list가 없거나 보이지 않음")
+                return
+            
+            print("DEBUG: memo_list 테이블 업데이트 시작")
+            
+            # 현재 선택된 네비게이션 아이템 확인
+            current_item = self.memo_list.nav_tree.currentItem()
+            if not current_item:
+                # 기본적으로 전체 메모 표시
+                print("DEBUG: 현재 선택된 아이템이 없음, 전체 메모 표시")
+                series_cache = self.series_cache if hasattr(self, 'series_cache') else {}
+                self.emitter.list_data_loaded.emit(self.local_cache, True, series_cache)
+                return
+            
+            nav_id = current_item.data(0, Qt.UserRole)
+            print(f"DEBUG: 현재 선택된 nav_id: {nav_id}")
+            
+            if nav_id:
+                # 특정 태그나 즐겨찾기 선택된 경우
+                if nav_id == "favorites":
+                    favorites = config_manager.get_favorites()
+                    filtered_data = [row for row in self.local_cache if row[2] in favorites]
+                    print(f"DEBUG: 즐겨찾기 필터링 결과: {len(filtered_data)}개")
+                    series_cache = self.series_cache if hasattr(self, 'series_cache') else {}
+                    self.emitter.list_data_loaded.emit(filtered_data, True, series_cache)
+                else:
+                    # 태그별 필터링
+                    filtered_data = []
+                    for row in self.local_cache:
+                        if len(row) > 3 and row[3]:
+                            tags_in_row = [t.strip().lstrip('#') for t in row[3].replace(',', ' ').split() if t.strip().startswith('#')]
+                            if nav_id in tags_in_row:
+                                filtered_data.append(row)
+                    print(f"DEBUG: 태그 '{nav_id}' 필터링 결과: {len(filtered_data)}개")
+                    series_cache = self.series_cache if hasattr(self, 'series_cache') else {}
+                    self.emitter.list_data_loaded.emit(filtered_data, True, series_cache)
+            else:
+                # 전체 메모 표시
+                print("DEBUG: 전체 메모 표시")
+                series_cache = self.series_cache if hasattr(self, 'series_cache') else {}
+                self.emitter.list_data_loaded.emit(self.local_cache, True, series_cache)
+                
+        except Exception as e:
+            print(f"DEBUG: update_memo_list_table 오류: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def update_series_cache_immediately(self, moc_doc_id, new_chapter_id, new_chapter_title):
+        """새 회차 추가 시 시리즈 캐시를 즉시 업데이트"""
+        try:
+            # 기존 회차들의 정보를 가져옴
+            existing_chapters = []
+            for chapter_id, info in self.series_cache.items():
+                if info.get('parent_moc_id') == moc_doc_id:
+                    existing_chapters.append(chapter_id)
+            
+            # 새 회차를 맨 앞에 추가 (최신 회차)
+            if existing_chapters:
+                # 기존 첫 번째 회차의 이전 회차를 새 회차로 설정
+                first_chapter = existing_chapters[0]
+                if first_chapter in self.series_cache:
+                    self.series_cache[first_chapter]['prev_chapter_id'] = new_chapter_id
+            
+            # 새 회차의 시리즈 정보 설정
+            moc_info = next((row for row in self.local_cache if row[2] == moc_doc_id), None)
+            if moc_info:
+                self.series_cache[new_chapter_id] = {
+                    'parent_moc_id': moc_doc_id,
+                    'parent_moc_title': moc_info[0],
+                    'prev_chapter_id': None,
+                    'next_chapter_id': existing_chapters[0] if existing_chapters else None,
+                    'chapter_title': new_chapter_title
+                }
+                print(f"시리즈 캐시에 새 회차 추가: {new_chapter_title}")
+        except Exception as e:
+            print(f"시리즈 캐시 즉시 업데이트 오류: {e}")
+
     def rebuild_series_cache_if_needed(self):
         # 앱 시작 시 또는 데이터 동기화 후 호출되어 시리즈 정보를 재구성합니다.
         print("시리즈 캐시 재구성 시작...")
@@ -1669,8 +2124,63 @@ class AppController:
             self.emitter.status_update.emit("새 회차 메모 생성에 실패했습니다.", 5000)
             return
 
-        # 2. 부모 MOC 문서에 새 회차 링크 추가
-        link_to_add = f"\n- [[{full_new_title}]]"
+        # 2. 부모 MOC 문서에 새 회차 링크 추가 (예쁘게 포맷팅)
+        # 먼저 MOC 문서의 현재 내용을 확인하여 목록 섹션 찾기
+        moc_title, moc_content, moc_tags = google_api_handler.load_doc_content(moc_doc_id, as_html=False)
+        
+        if moc_content:
+            # 기존 회차 개수 세기 (더 정확한 패턴 매칭)
+            existing_chapters = []
+            lines = moc_content.split('\n')
+            
+            # 목록 섹션 찾기
+            list_section_start = -1
+            for i, line in enumerate(lines):
+                if '#### 목록' in line or '### 목록' in line or '## 목록' in line:
+                    list_section_start = i
+                    break
+            
+            if list_section_start >= 0:
+                # 목록 섹션 내에서 기존 회차들 찾기
+                for i in range(list_section_start + 1, len(lines)):
+                    line = lines[i].strip()
+                    # 번호가 매겨진 회차 항목 찾기 (1. [[...]], 2. [[...]] 등)
+                    if re.match(r'^\d+\.\s*\[\[.*\]\]', line):
+                        existing_chapters.append(line)
+                    elif line.startswith('####') or line.startswith('###') or line.startswith('##'):
+                        # 다른 섹션이 시작되면 목록 섹션 종료
+                        break
+                    elif not line:
+                        # 빈 줄은 무시
+                        continue
+                    elif '[[(' in line and ']]' in line:
+                        # 번호가 없는 회차도 카운트
+                        existing_chapters.append(line)
+            else:
+                # 목록 섹션이 없는 경우 모든 회차 링크 찾기
+                for line in lines:
+                    if '[[(' in line and ']]' in line and '테스트 회차' in line:
+                        existing_chapters.append(line.strip())
+            
+            chapter_number = len(existing_chapters) + 1
+            print(f"DEBUG: 기존 회차 {len(existing_chapters)}개 발견, 새 회차 번호: {chapter_number}")
+            
+            # 목록 섹션이 있는지 확인
+            has_list_section = list_section_start >= 0
+            
+            if has_list_section:
+                # 기존 목록 섹션에 추가
+                link_to_add = f"\n{chapter_number}. [[{full_new_title}]]"
+                print(f"DEBUG: 기존 목록 섹션에 추가: {link_to_add}")
+            else:
+                # 새로운 목록 섹션 생성
+                link_to_add = f"\n\n#### 목록\n{chapter_number}. [[{full_new_title}]]"
+                print(f"DEBUG: 새로운 목록 섹션 생성: {link_to_add}")
+        else:
+            # MOC 문서 내용을 가져올 수 없는 경우 기본 형태로 추가
+            link_to_add = f"\n\n#### 목록\n1. [[{full_new_title}]]"
+            print(f"DEBUG: MOC 문서 내용 없음, 기본 형태로 추가: {link_to_add}")
+        
         update_success = google_api_handler.append_text_to_doc(moc_doc_id, link_to_add)
 
         if not update_success:
@@ -1681,27 +2191,66 @@ class AppController:
         from datetime import datetime
         current_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         new_row = [full_new_title, current_date, new_doc_id, tags_str]
-        self.local_cache.insert(0, new_row)
+        
+        # 새 항목이 이미 있는지 확인하고 중복 방지
+        existing_ids = {row[2] for row in self.local_cache if len(row) > 2}
+        if new_doc_id not in existing_ids:
+            self.local_cache.insert(0, new_row)
+            print(f"DEBUG: 새 회차가 local_cache에 추가됨: {full_new_title}")
+        else:
+            print(f"DEBUG: 새 회차가 이미 local_cache에 존재함: {full_new_title}")
+        
         self.update_tags_from_cache()
 
         # 4. MOC 문서의 로컬 콘텐츠 캐시 삭제
         moc_cache_path_html = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{moc_doc_id}.html")
         moc_cache_path_txt = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{moc_doc_id}.txt")
         if os.path.exists(moc_cache_path_html):
-            try: os.remove(moc_cache_path_html)
-            except OSError as e: print(f"MOC HTML 캐시 삭제 오류: {e}")
+            try: 
+                os.remove(moc_cache_path_html)
+                print(f"DEBUG: MOC HTML 캐시 삭제 완료: {moc_cache_path_html}")
+            except OSError as e: 
+                print(f"MOC HTML 캐시 삭제 오류: {e}")
         if os.path.exists(moc_cache_path_txt):
-            try: os.remove(moc_cache_path_txt)
-            except OSError as e: print(f"MOC TXT 캐시 삭제 오류: {e}")
+            try: 
+                os.remove(moc_cache_path_txt)
+                print(f"DEBUG: MOC TXT 캐시 삭제 완료: {moc_cache_path_txt}")
+            except OSError as e: 
+                print(f"MOC TXT 캐시 삭제 오류: {e}")
 
         # 5. UI 업데이트
         self.emitter.status_update.emit("새 회차가 성공적으로 추가되었습니다.", 3000)
+        
+        # MOC 문서가 열려있는 경우 즉시 새로고침
         if self.rich_viewer.isVisible() and self.current_viewing_doc_id == moc_doc_id:
-            self.view_memo_by_id(moc_doc_id)
+            print("DEBUG: MOC 문서가 열려있어서 즉시 새로고침")
+            # MOC 문서의 캐시를 삭제했으므로 강제로 새로고침
+            threading.Thread(target=self.refresh_document_content, args=(moc_doc_id,), daemon=True).start()
+        else:
+            print("DEBUG: MOC 문서가 열려있지 않음")
+            # MOC 문서가 열려있지 않더라도 나중에 열 때 최신 내용이 보이도록 강제 새로고침
+            print("DEBUG: MOC 문서 강제 새로고침을 위해 view_memo_by_id 호출")
+            self.view_memo_by_id(moc_doc_id, force_refresh=True)
+        
+        # 네비게이션 트리 업데이트
+        print("DEBUG: 네비게이션 트리 업데이트")
         self.emitter.nav_tree_updated.emit(self.all_tags, self.local_cache)
         
+        # 문서 목록 테이블도 즉시 업데이트 (memo_list가 열려있을 때만)
+        if hasattr(self, 'memo_list') and self.memo_list.isVisible():
+            print("DEBUG: memo_list가 열려있어서 테이블 업데이트")
+            self.update_memo_list_table()
+        else:
+            print("DEBUG: memo_list가 열려있지 않아서 테이블 업데이트 건너뜀")
+        
+        # 시리즈 캐시 즉시 업데이트
+        print("DEBUG: 시리즈 캐시 즉시 업데이트")
+        self.update_series_cache_immediately(moc_doc_id, new_doc_id, chapter_title)
+        
         # 6. 백그라운드에서 전체 동기화 실행 (다른 변경사항과의 일관성 유지)
+        print("DEBUG: 백그라운드 동기화 시작")
         self.rebuild_series_cache_if_needed()
 
         # 7. 새로 생성된 회차의 콘텐츠를 미리 캐싱
+        print("DEBUG: 새 회차 콘텐츠 캐싱 시작")
         threading.Thread(target=self.sync_rich_content_thread, args=(new_doc_id, False), daemon=True).start()
