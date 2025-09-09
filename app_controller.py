@@ -93,6 +93,14 @@ class AppController:
         self.current_page_token = None
         self.next_page_token = None
         self.prev_page_tokens = []
+        
+        # 로컬 캐시 페이징 관련 변수들
+        try:
+            self.local_page_size = int(config_manager.get_setting('Display', 'local_page_size'))
+        except (ValueError, TypeError):
+            self.local_page_size = 20  # 기본값
+        self.current_local_page = 1
+        self.total_local_pages = 1
         self.search_timer = QTimer()
         self.search_timer.setSingleShot(True)
         self.search_timer.timeout.connect(self.perform_search)
@@ -135,7 +143,7 @@ class AppController:
         self.emitter.show_edit_memo.connect(self.memo_editor.open_document, Qt.QueuedConnection)
         self.emitter.show_edit_memo.connect(self.open_editor_with_content, Qt.QueuedConnection)
         self.emitter.show_rich_view.connect(self.rich_viewer.set_content, Qt.QueuedConnection)
-        self.emitter.status_update.connect(self.memo_list.statusBar.showMessage, Qt.QueuedConnection)
+        self.emitter.status_update.connect(self.memo_list.show_status_message, Qt.QueuedConnection)
         self.emitter.persistent_notification.connect(self.show_persistent_notification)
         self.emitter.toast_notification.connect(self.show_toast_notification)
         self.notification_window.view_memo_requested.connect(self.view_memo_from_notification)
@@ -189,6 +197,9 @@ class AppController:
         self.memo_editor.tag_input.textChanged.connect(self.on_editor_text_changed)
         self.auto_save_timer.timeout.connect(lambda: self.save_memo(is_auto_save=True))
         self.emitter.auto_save_status_update.connect(self.memo_editor.update_auto_save_status, Qt.QueuedConnection)
+        
+        # 편집 모드에서 보기 모드로 전환
+        self.memo_editor.view_requested.connect(self.view_memo_by_id)
         
         self.memo_list.graph_view_requested.connect(self.show_knowledge_graph)
         self.emitter.graph_data_generated.connect(self.on_graph_data_generated)
@@ -303,13 +314,13 @@ class AppController:
             print("DEBUG: memo_list가 보이지 않거나 전체 텍스트 검색 중")
 
     def start_initial_sync(self):
-        self.emitter.status_update.emit("최신 정보 동기화 중...", 2000)
+        self.emitter.status_update.emit("최신 정보 동기화 중...", "info")
         threading.Thread(target=self.sync_cache_thread, daemon=True).start()
 
     def sync_cache_thread(self):
         sheet_data = google_api_handler.load_memo_list()
         if sheet_data is None:
-            self.emitter.status_update.emit("목록 동기화 실패 (시트 로드 오류)", 5000)
+            self.emitter.status_update.emit("목록 동기화 실패 (시트 로드 오류)", "error")
             return
 
         # 데이터베이스 유효성 검사: 시트에 있는 ID가 실제 Drive에 존재하는지 확인
@@ -350,11 +361,11 @@ class AppController:
                 
                 self.emitter.nav_tree_updated.emit(self.all_tags, self.local_cache)
                 self.emitter.sync_finished_update_list.emit()
-                self.emitter.status_update.emit("동기화 완료.", 5000)
+                self.emitter.status_update.emit("동기화 완료.", "success")
                 self.rebuild_series_cache_if_needed() # 시리즈 캐시 업데이트
             else:
                 print("DEBUG: sync_cache_thread - local_cache 변경 없음")
-                self.emitter.status_update.emit("이미 최신 상태입니다.", 3000)
+                self.emitter.status_update.emit("이미 최신 상태입니다.", "info")
 
     def load_cache_only(self, initial_load=False):
         try:
@@ -382,6 +393,9 @@ class AppController:
     def on_navigation_selected(self, selected_item_id):
         self.memo_list.search_bar.clear()
         self.memo_list.full_text_search_check.setChecked(False)
+        
+        # 네비게이션 변경 시 페이지를 1로 리셋
+        self.current_local_page = 1
 
         # 시리즈 캐시 가져오기
         series_cache = self.series_cache if hasattr(self, 'series_cache') else {}
@@ -389,21 +403,21 @@ class AppController:
         # id가 favorites이면 즐겨찾기 목록을 표시
         if selected_item_id == "favorites":
             fav_memos = [row for row in self.local_cache if len(row) > 2 and row[2] in self.favorites]
-            self.emitter.list_data_loaded.emit(fav_memos, True, series_cache)
+            self._display_paginated_data(fav_memos)
             return
 
         # "태그 (12)" 와 같은 형식에서 텍스트 부분만 추출
         clean_selected_item = re.sub(r'\s*\(\d+\)', '', selected_item_id).strip()
 
         if clean_selected_item == "전체 메모":
-            self.emitter.list_data_loaded.emit(self.local_cache, True, series_cache)
+            self._display_paginated_data(self.local_cache)
         elif clean_selected_item not in ["태그", ""]:
             # 선택된 태그를 포함하는 메모만 필터링
             filtered_data = [
                 row for row in self.local_cache
                 if len(row) > 3 and row[3] and clean_selected_item in [tag.strip().lstrip('#') for tag in row[3].replace(',', ' ').split()]
             ]
-            self.emitter.list_data_loaded.emit(filtered_data, True, series_cache)
+            self._display_paginated_data(filtered_data)
 
     def on_editor_text_changed(self):
         self.emitter.auto_save_status_update.emit("변경사항이 있습니다...")
@@ -500,6 +514,9 @@ class AppController:
         is_full_text = self.memo_list.full_text_search_check.isChecked()
         self.memo_list.search_bar.setPlaceholderText("본문 내용으로 검색..." if is_full_text else "제목으로 실시간 필터링...")
         
+        # 검색 모드 변경 시 페이지 리셋
+        self.current_local_page = 1
+        
         if is_full_text:
             series_cache = self.series_cache if hasattr(self, 'series_cache') else {}
             self.emitter.list_data_loaded.emit([], False, series_cache)
@@ -531,9 +548,10 @@ class AppController:
             filtered_data = [row for row in base_data if query in row[0].lower()]
         else:
             filtered_data = base_data
-            
-        series_cache = self.series_cache if hasattr(self, 'series_cache') else {}
-        self.emitter.list_data_loaded.emit(filtered_data, True, series_cache)
+        
+        # 검색 시 페이지를 1로 리셋
+        self.current_local_page = 1
+        self._display_paginated_data(filtered_data)
 
 
     def perform_search(self, page_token=None, is_prev=False, is_next=False):
@@ -542,10 +560,10 @@ class AppController:
             series_cache = self.series_cache if hasattr(self, 'series_cache') else {}
             self.emitter.list_data_loaded.emit([], False, series_cache)
             self.memo_list.update_paging_buttons(False, False, 1)
-            self.emitter.status_update.emit("검색어를 입력하세요.", 3000)
+            self.emitter.status_update.emit("검색어를 입력하세요.", "info")
             return
 
-        self.emitter.status_update.emit(f"'{query}' 검색 중...", 0)
+        self.emitter.status_update.emit(f"'{query}' 검색 중...", "info")
         if not is_prev and not is_next:
             self.prev_page_tokens.clear()
         if is_next:
@@ -561,17 +579,33 @@ class AppController:
         prev_enabled = len(self.prev_page_tokens) > 0
         page_num = len(self.prev_page_tokens) + 1
         self.memo_list.update_paging_buttons(prev_enabled, self.next_page_token is not None, page_num)
-        self.emitter.status_update.emit(f"'{query}' 검색 완료.", 3000)
+        self.emitter.status_update.emit(f"'{query}' 검색 완료.", "success")
 
         
     def go_to_prev_page(self):
-        if self.prev_page_tokens:
-            prev_token = self.prev_page_tokens.pop()
-            self.perform_search(page_token=prev_token, is_prev=True)
+        # 로컬 캐시 페이징인지 API 페이징인지 확인
+        if self.memo_list.full_text_search_check.isChecked():
+            # API 검색 모드
+            if self.prev_page_tokens:
+                prev_token = self.prev_page_tokens.pop()
+                self.perform_search(page_token=prev_token, is_prev=True)
+        else:
+            # 로컬 캐시 페이징
+            if self.current_local_page > 1:
+                self.current_local_page -= 1
+                self.update_memo_list_table()
 
     def go_to_next_page(self):
-        if self.next_page_token:
-            self.perform_search(page_token=self.next_page_token, is_next=True)
+        # 로컬 캐시 페이징인지 API 페이징인지 확인
+        if self.memo_list.full_text_search_check.isChecked():
+            # API 검색 모드
+            if self.next_page_token:
+                self.perform_search(page_token=self.next_page_token, is_next=True)
+        else:
+            # 로컬 캐시 페이징
+            if self.current_local_page < self.total_local_pages:
+                self.current_local_page += 1
+                self.update_memo_list_table()
 
     def save_memo(self, is_auto_save=False):
         self.auto_save_timer.stop()
@@ -598,7 +632,7 @@ class AppController:
 
     def save_memo_thread(self, title, content, tags, is_auto_save=False):
         from datetime import datetime
-        self.emitter.status_update.emit(f"'{title}' 저장 중...", 0)
+        self.emitter.status_update.emit(f"'{title}' 저장 중...", "info")
         success, new_doc_id = google_api_handler.save_memo(title, content, tags)
         if success:
             self.emitter.auto_save_status_update.emit("모든 변경사항이 저장됨")
@@ -629,14 +663,14 @@ class AppController:
                 nav_text = current_nav_item.text(0) if current_nav_item else "전체 메모"
                 self.on_navigation_selected(nav_text)
 
-            self.emitter.status_update.emit("저장 완료.", 5000)
+            self.emitter.status_update.emit("저장 완료.", "success")
         else:
-            self.emitter.status_update.emit("저장 실패", 5000)
+            self.emitter.status_update.emit("저장 실패", "error")
             self.emitter.auto_save_status_update.emit("저장 실패")
 
     def update_memo_thread(self, doc_id, title, content, tags, is_auto_save=False):
         from datetime import datetime
-        self.emitter.status_update.emit(f"'{title}' 업데이트 중...", 0)
+        self.emitter.status_update.emit(f"'{title}' 업데이트 중...", "info")
         success = google_api_handler.update_memo(doc_id, title, content, tags)
         if success:
             self.emitter.auto_save_status_update.emit("모든 변경사항이 저장됨")
@@ -679,9 +713,9 @@ class AppController:
             if self.rich_viewer.isVisible() and self.current_viewing_doc_id == doc_id:
                 self.view_memo_by_id(doc_id)
             
-            self.emitter.status_update.emit("업데이트 완료.", 5000)
+            self.emitter.status_update.emit("업데이트 완료.", "success")
         else:
-            self.emitter.status_update.emit("업데이트 실패", 5000)
+            self.emitter.status_update.emit("업데이트 실패", "error")
 
 
     def _get_view_mode_info(self, doc_id):
@@ -765,6 +799,10 @@ class AppController:
         if self.rich_viewer.isVisible() and self.current_viewing_doc_id == doc_id and not force_refresh:
             self.rich_viewer.activateWindow()
             return
+
+        # 편집 창이 열려있다면 숨기기
+        if self.memo_editor.isVisible():
+            self.memo_editor.hide()
 
         view_mode_info = self._get_view_mode_info(doc_id)
         self.rich_viewer.update_favorite_status(doc_id in self.favorites)
@@ -1152,7 +1190,7 @@ class AppController:
     def show_context_menu(self, pos):
         item = self.memo_list.table.itemAt(pos)
         if not item: return
-        doc_id = item.data(Qt.UserRole)
+        doc_id = item.data(0, Qt.UserRole)  # column과 role을 명시적으로 지정
         menu = QMenu()
         edit_action = menu.addAction("편집하기")
         edit_tags_action = menu.addAction("태그 수정하기")
@@ -1392,6 +1430,9 @@ class AppController:
     def edit_current_viewing_memo(self):
         if self.current_viewing_doc_id:
             print(f"뷰어에서 편집 요청: {self.current_viewing_doc_id}")
+            # 편집 창이 이미 열려있다면 숨기기
+            if self.memo_editor.isVisible():
+                self.memo_editor.hide()
             self.rich_viewer.hide() # 현재 뷰어 창은 닫고
             self.edit_memo(self.current_viewing_doc_id) # 편집 창을 연다
     
@@ -1426,15 +1467,24 @@ class AppController:
             self.toggle_favorite(self.current_viewing_doc_id)
 
     def on_favorite_status_changed(self, doc_id, is_favorite):
-        # 1. 목록 창의 아이콘 업데이트
-        for row in range(self.memo_list.table.rowCount()):
-            item = self.memo_list.table.item(row, 1) # 제목 아이템
-            if item and item.data(Qt.UserRole) == doc_id:
-                fav_item = self.memo_list.table.item(row, 0)
-                if fav_item:
-                    icon = qta.icon('fa5s.star', color='#f0c420') if is_favorite else qta.icon('fa5s.star', color='#aaa')
-                    fav_item.setIcon(icon)
-                break
+        # 1. 목록 창의 아이콘 업데이트 (QTreeWidget용)
+        def update_favorite_icon(item):
+            if item.data(0, Qt.UserRole) == doc_id:
+                icon = qta.icon('fa5s.star', color='#f0c420') if is_favorite else qta.icon('fa5s.star', color='#ced4da')
+                item.setIcon(0, icon)
+                return True
+            return False
+        
+        # 최상위 아이템들 검사
+        for i in range(self.memo_list.table.topLevelItemCount()):
+            item = self.memo_list.table.topLevelItem(i)
+            if update_favorite_icon(item):
+                return
+            # 하위 아이템들도 검사
+            for j in range(item.childCount()):
+                child_item = item.child(j)
+                if update_favorite_icon(child_item):
+                    return
         
         if self.rich_viewer.isVisible() and self.current_viewing_doc_id == doc_id:
             self.rich_viewer.update_favorite_status(is_favorite)
@@ -1951,8 +2001,7 @@ class AppController:
             if not current_item:
                 # 기본적으로 전체 메모 표시
                 print("DEBUG: 현재 선택된 아이템이 없음, 전체 메모 표시")
-                series_cache = self.series_cache if hasattr(self, 'series_cache') else {}
-                self.emitter.list_data_loaded.emit(self.local_cache, True, series_cache)
+                self._display_paginated_data(self.local_cache)
                 return
             
             nav_id = current_item.data(0, Qt.UserRole)
@@ -1964,8 +2013,7 @@ class AppController:
                     favorites = config_manager.get_favorites()
                     filtered_data = [row for row in self.local_cache if row[2] in favorites]
                     print(f"DEBUG: 즐겨찾기 필터링 결과: {len(filtered_data)}개")
-                    series_cache = self.series_cache if hasattr(self, 'series_cache') else {}
-                    self.emitter.list_data_loaded.emit(filtered_data, True, series_cache)
+                    self._display_paginated_data(filtered_data)
                 else:
                     # 태그별 필터링
                     filtered_data = []
@@ -1975,16 +2023,45 @@ class AppController:
                             if nav_id in tags_in_row:
                                 filtered_data.append(row)
                     print(f"DEBUG: 태그 '{nav_id}' 필터링 결과: {len(filtered_data)}개")
-                    series_cache = self.series_cache if hasattr(self, 'series_cache') else {}
-                    self.emitter.list_data_loaded.emit(filtered_data, True, series_cache)
+                    self._display_paginated_data(filtered_data)
             else:
                 # 전체 메모 표시
                 print("DEBUG: 전체 메모 표시")
-                series_cache = self.series_cache if hasattr(self, 'series_cache') else {}
-                self.emitter.list_data_loaded.emit(self.local_cache, True, series_cache)
+                self._display_paginated_data(self.local_cache)
                 
         except Exception as e:
             print(f"DEBUG: update_memo_list_table 오류: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _display_paginated_data(self, data):
+        """데이터를 페이지 단위로 나누어서 표시"""
+        try:
+            # 전체 페이지 수 계산
+            self.total_local_pages = max(1, (len(data) + self.local_page_size - 1) // self.local_page_size)
+            
+            # 현재 페이지가 전체 페이지를 초과하지 않도록 조정
+            if self.current_local_page > self.total_local_pages:
+                self.current_local_page = self.total_local_pages
+            
+            # 현재 페이지에 해당하는 데이터 추출
+            start_idx = (self.current_local_page - 1) * self.local_page_size
+            end_idx = start_idx + self.local_page_size
+            page_data = data[start_idx:end_idx]
+            
+            print(f"DEBUG: 페이징 - 전체 {len(data)}개, 페이지 {self.current_local_page}/{self.total_local_pages}, 표시 {len(page_data)}개")
+            
+            # 시리즈 캐시와 함께 데이터 전송
+            series_cache = self.series_cache if hasattr(self, 'series_cache') else {}
+            self.emitter.list_data_loaded.emit(page_data, True, series_cache)
+            
+            # 페이징 버튼 상태 업데이트
+            prev_enabled = self.current_local_page > 1
+            next_enabled = self.current_local_page < self.total_local_pages
+            self.memo_list.update_paging_buttons(prev_enabled, next_enabled, self.current_local_page)
+            
+        except Exception as e:
+            print(f"DEBUG: _display_paginated_data 오류: {e}")
             import traceback
             traceback.print_exc()
 

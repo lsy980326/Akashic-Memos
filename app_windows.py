@@ -158,6 +158,9 @@ class RichMemoViewWindow(QWidget):
         self.content_display.setPage(self.page)
         self.page.linkClicked.connect(self.link_activated)
         self.content_display.tags_edit_requested.connect(self.tags_edit_requested.emit)
+        
+        # 더블클릭으로 편집 모드 전환
+        self.content_display.mouseDoubleClickEvent = self.on_content_double_click
 
 
         self.toolbar = QToolBar("Main Toolbar")
@@ -168,7 +171,7 @@ class RichMemoViewWindow(QWidget):
         
 
         self.edit_action = QAction(qta.icon('fa5s.pencil-alt', color=icon_color), "편집", self)
-        self.edit_action.setToolTip("이 메모를 편집합니다.")
+        self.edit_action.setToolTip("이 메모를 편집합니다. (Ctrl+E, F2, 더블클릭)")
         self.edit_action.triggered.connect(self.edit_requested.emit)
         self.toolbar.addAction(self.edit_action)
 
@@ -349,6 +352,11 @@ class RichMemoViewWindow(QWidget):
     def on_refresh_triggered(self):
         if self.current_doc_id:
             self.refresh_requested.emit(self.current_doc_id)
+    
+    def on_content_double_click(self, event):
+        # 더블클릭 시 편집 모드로 전환
+        self.edit_requested.emit()
+        super().mouseDoubleClickEvent(event)
 
     def zoom_in(self):
         self.current_zoom_factor = min(2.0, self.current_zoom_factor + 0.1)
@@ -389,10 +397,19 @@ class RichMemoViewWindow(QWidget):
         color = '#f0c420' if is_favorite else '#666'
         self.fav_action.setIcon(qta.icon('fa5s.star' if is_favorite else 'fa5s.star', color=color))
 
+    def keyPressEvent(self, event):
+        # Ctrl+E 또는 F2 키로 편집 모드 전환
+        if (event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_E) or event.key() == Qt.Key_F2:
+            self.edit_requested.emit()
+        else:
+            super().keyPressEvent(event)
+    
     def closeEvent(self, event):
         self.hide()
 
 class MarkdownEditorWindow(QWidget):
+    view_requested = pyqtSignal(str)  # 편집 모드에서 보기 모드로 전환 요청
+    
     def __init__(self):
         super().__init__()
         self.window_name = "MarkdownEditorWindow"
@@ -424,9 +441,15 @@ class MarkdownEditorWindow(QWidget):
         self.save_button = QPushButton(' 저장')
         self.save_button.setIcon(qta.icon('fa5s.save', color='white'))
         
+        self.view_button = QPushButton(' 보기')
+        self.view_button.setIcon(qta.icon('fa5s.eye', color='white'))
+        self.view_button.setToolTip("보기 모드로 전환 (Ctrl+E, F2)")
+        self.view_button.clicked.connect(self.on_view_button_clicked)
+        
         top_layout.addWidget(self.title_input)
         top_layout.addWidget(self.add_image_button)
         top_layout.addWidget(self.add_file_button)
+        top_layout.addWidget(self.view_button)
         top_layout.addWidget(self.save_button)
         main_layout.addLayout(top_layout)
         splitter = QSplitter(Qt.Horizontal); self.editor = QTextEdit()
@@ -499,6 +522,20 @@ class MarkdownEditorWindow(QWidget):
             markdown_link = f"[{os.path.basename(file_name)}](resources/files/{os.path.basename(file_name)})"
             self.editor.insertPlainText(markdown_link)
 
+    def on_view_button_clicked(self):
+        # 보기 버튼 클릭 시 보기 모드로 전환
+        if self.current_doc_id:
+            self.view_requested.emit(self.current_doc_id)
+    
+    def keyPressEvent(self, event):
+        # Ctrl+E 또는 F2 키로 보기 모드로 전환
+        if (event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_E) or event.key() == Qt.Key_F2:
+            # 현재 편집 중인 문서를 보기 모드로 전환
+            if self.current_doc_id:
+                self.view_requested.emit(self.current_doc_id)
+        else:
+            super().keyPressEvent(event)
+    
     def closeEvent(self, event):
         geometry_hex = self.saveGeometry().toHex().data().decode('utf-8')
         config_manager.save_window_state(self.window_name, geometry_hex)
@@ -667,39 +704,172 @@ class MemoListWindow(QWidget):
         screen_geometry = get_screen_geometry()
         self.resize(int(screen_geometry.width() * 0.5), int(screen_geometry.height() * 0.6))
         center_window(self)
+        
+        # 윈도우 스타일 설정
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #ffffff;
+                color: #212529;
+            }
+        """)
 
         # ===================================================================
         # 패널 및 레이아웃 생성
         # ===================================================================
         # --- 전체를 감싸는 메인 레이아웃 ---
         main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(8)
 
         # --- 좌/우 분할을 위한 스플리터 ---
         splitter = QSplitter(Qt.Horizontal)
+        splitter.setStyleSheet("""
+            QSplitter::handle {
+                background-color: #e9ecef;
+                width: 1px;
+            }
+            QSplitter::handle:hover {
+                background-color: #ced4da;
+            }
+        """)
 
         # --- 왼쪽 패널 (네비게이션 트리용) ---
         left_panel = QFrame()
+        left_panel.setObjectName("LeftPanel")
+        left_panel.setStyleSheet("""
+            #LeftPanel {
+                background-color: #fafbfc;
+                border: 1px solid #e9ecef;
+                border-radius: 6px;
+            }
+        """)
         left_layout = QVBoxLayout(left_panel)
-        # left_panel.setMaximumWidth(200)
+        left_layout.setContentsMargins(8, 8, 8, 8)
+        left_layout.setSpacing(4)
 
         # --- 오른쪽 패널 (메인 콘텐츠용) ---
         right_panel = QFrame()
+        right_panel.setObjectName("RightPanel")
+        right_panel.setStyleSheet("""
+            #RightPanel {
+                background-color: #ffffff;
+                border: 1px solid #e9ecef;
+                border-radius: 6px;
+            }
+        """)
         right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(12, 12, 12, 12)
+        right_layout.setSpacing(8)
 
         # ===================================================================
         # 왼쪽 패널 위젯 설정
         # ===================================================================
+        # 네비게이션 트리 제목
+        nav_title = QLabel("카테고리")
+        nav_title.setStyleSheet("""
+            QLabel {
+                font-weight: 600;
+                font-size: 11pt;
+                color: #495057;
+                padding: 4px 0px;
+                background: transparent;
+                border: none;
+            }
+        """)
+        left_layout.addWidget(nav_title)
+        
         self.nav_tree = QTreeWidget()
         self.nav_tree.setHeaderHidden(True)
+        self.nav_tree.setStyleSheet("""
+            QTreeWidget {
+                background-color: transparent;
+                border: none;
+                font-size: 10pt;
+            }
+            QTreeWidget::item {
+                padding: 6px 4px;
+                border-radius: 4px;
+                margin: 1px 0px;
+            }
+            QTreeWidget::item:selected {
+                background-color: #e3f2fd;
+                color: #1976d2;
+            }
+            QTreeWidget::item:hover {
+                background-color: #f5f5f5;
+            }
+            /* 스크롤바 스타일링 */
+            QScrollBar:vertical {
+                background-color: #f8f9fa;
+                width: 12px;
+                border: none;
+                border-radius: 6px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #dee2e6;
+                border-radius: 6px;
+                min-height: 20px;
+                margin: 2px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background-color: #ced4da;
+            }
+            QScrollBar::handle:vertical:pressed {
+                background-color: #adb5bd;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+                background: none;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: none;
+            }
+        """)
         left_layout.addWidget(self.nav_tree)
 
         # ===================================================================
         # 오른쪽 패널 위젯 설정
         # ===================================================================
         # --- 1. 검색 바 ---
-        search_layout = QHBoxLayout()
+        search_container = QFrame()
+        search_container.setObjectName("SearchContainer")
+        search_container.setStyleSheet("""
+            #SearchContainer {
+                background-color: #f8f9fa;
+                border: 1px solid #e9ecef;
+                border-radius: 6px;
+                padding: 8px;
+            }
+        """)
+        search_layout = QHBoxLayout(search_container)
+        search_layout.setContentsMargins(8, 8, 8, 8)
+        search_layout.setSpacing(8)
+        
         self.search_bar = QLineEdit()
+        self.search_bar.setPlaceholderText("메모 검색...")
+        self.search_bar.setStyleSheet("""
+            QLineEdit {
+                background-color: #ffffff;
+                border: 1px solid #e9ecef;
+                border-radius: 6px;
+                padding: 10px 12px;
+                font-size: 10pt;
+            }
+            QLineEdit:focus {
+                border: 2px solid #1976d2;
+                background-color: #fafbfc;
+            }
+        """)
+        
         self.full_text_search_check = QCheckBox("본문 포함")
+        self.full_text_search_check.setStyleSheet("""
+            QCheckBox {
+                font-size: 10pt;
+                color: #495057;
+                spacing: 6px;
+            }
+        """)
 
         self.graph_button = QPushButton(qta.icon('fa5s.project-diagram', color='#495057'), "")
         self.graph_button.setObjectName("PagingButton")
@@ -708,51 +878,177 @@ class MemoListWindow(QWidget):
 
         self.refresh_button = QPushButton(qta.icon('fa5s.sync-alt', color='#495057'), "")
         self.refresh_button.setObjectName("PagingButton")
-
-
-
+        self.refresh_button.setToolTip("목록 새로고침")
 
         search_layout.addWidget(self.search_bar)
         search_layout.addWidget(self.full_text_search_check)
         search_layout.addWidget(self.graph_button)
         search_layout.addWidget(self.refresh_button)
-        right_layout.addLayout(search_layout)
+        right_layout.addWidget(search_container)
 
-        # --- 2. 데이터 테이블 (트리 구조 지원) ---
+        # --- 2. 상태 바 (검색창과 테이블 사이) ---
+        self.statusBar = QStatusBar()
+        self.statusBar.setStyleSheet("""
+            QStatusBar {
+                background-color: #f8f9fa;
+                border: 1px solid #e9ecef;
+                border-radius: 6px;
+                color: #6c757d;
+                font-size: 9pt;
+                padding: 8px 12px;
+                margin: 4px 0px;
+                min-height: 24px;
+                max-height: 24px;
+            }
+        """)
+        right_layout.addWidget(self.statusBar)
+
+        # --- 3. 데이터 테이블 (트리 구조 지원) ---
+        table_container = QFrame()
+        table_container.setObjectName("TableContainer")
+        table_container.setStyleSheet("""
+            #TableContainer {
+                background-color: #ffffff;
+                border: 1px solid #e9ecef;
+                border-radius: 6px;
+                padding: 4px;
+            }
+        """)
+        table_layout = QVBoxLayout(table_container)
+        table_layout.setContentsMargins(0, 0, 0, 0)
+        
         self.table = QTreeWidget()
         self.table.setColumnCount(4)
-        self.table.setHeaderLabels(['', '제목', '날짜', '태그'])
-        self.table.setColumnWidth(0, 30)
-        self.table.header().setSectionResizeMode(0, QHeaderView.Fixed) # 첫 번째 열 너비 고정
-        self.table.header().setSectionResizeMode(1, QHeaderView.Stretch) # 두 번째 열 너비 확장
+        self.table.setHeaderLabels(['', '제목', '태그', '날짜'])  # 태그와 날짜 순서 변경
+        self.table.setColumnWidth(0, 50)  # 즐겨찾기 컬럼 초기 너비 (더 작게)
+        self.table.setColumnWidth(2, 100)  # 태그 컬럼 초기 너비 (최소한으로)
+        self.table.setColumnWidth(3, 150)  # 날짜 컬럼 초기 너비 (최소한으로)
+        self.table.header().setSectionResizeMode(0, QHeaderView.Fixed) # 즐겨찾기 열 고정
+        self.table.header().setSectionResizeMode(1, QHeaderView.Stretch) # 제목 열 너비 확장 (가장 넓게)
+        # self.table.header().setSectionResizeMode(2, QHeaderView.Fixed) # 태그 열 완전 고정
+        # self.table.header().setSectionResizeMode(3, QHeaderView.Fixed) # 날짜 열 완전 고정
+        self.table.header().setStretchLastSection(False)  # 마지막 섹션 자동 확장 비활성화
         self.table.setRootIsDecorated(True) # 루트 아이템에 화살표 표시
         self.table.setAlternatingRowColors(True) # 번갈아가며 색상 표시
-        right_layout.addWidget(self.table)
+        self.table.setStyleSheet("""
+            QTreeWidget {
+                background-color: transparent;
+                border: none;
+                font-size: 10pt;
+            }
+            QTreeWidget::item {
+                padding: 8px 4px;
+                border-bottom: 1px solid #f1f3f5;
+            }
+            QTreeWidget::item:selected {
+                background-color: #e3f2fd;
+                color: #1976d2;
+            }
+            QTreeWidget::item:hover {
+                background-color: #f5f5f5;
+            }
+            /* 스크롤바 스타일링 */
+            QScrollBar:vertical {
+                background-color: #f8f9fa;
+                width: 12px;
+                border: none;
+                border-radius: 6px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #dee2e6;
+                border-radius: 6px;
+                min-height: 20px;
+                margin: 2px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background-color: #ced4da;
+            }
+            QScrollBar::handle:vertical:pressed {
+                background-color: #adb5bd;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+                background: none;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: none;
+            }
+            QScrollBar:horizontal {
+                background-color: #f8f9fa;
+                height: 12px;
+                border: none;
+                border-radius: 6px;
+                margin: 0px;
+            }
+            QScrollBar::handle:horizontal {
+                background-color: #dee2e6;
+                border-radius: 6px;
+                min-width: 20px;
+                margin: 2px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background-color: #ced4da;
+            }
+            QScrollBar::handle:horizontal:pressed {
+                background-color: #adb5bd;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0px;
+                background: none;
+            }
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                background: none;
+            }
+        """)
+        table_layout.addWidget(self.table)
+        right_layout.addWidget(table_container)
 
-        # --- 3. 페이징 컨트롤 ---
-        paging_layout = QHBoxLayout()
+        # --- 4. 페이징 컨트롤 ---
+        paging_container = QFrame()
+        paging_container.setObjectName("PagingContainer")
+        paging_container.setStyleSheet("""
+            #PagingContainer {
+                background-color: #f8f9fa;
+                border: 1px solid #e9ecef;
+                border-radius: 6px;
+                padding: 8px;
+            }
+        """)
+        paging_layout = QHBoxLayout(paging_container)
+        paging_layout.setContentsMargins(8, 8, 8, 8)
+        paging_layout.setSpacing(8)
+        
         self.prev_button = QPushButton(qta.icon('fa5s.chevron-left', color='#495057'), "")
         self.prev_button.setObjectName("PagingButton")
+        self.prev_button.setToolTip("이전 페이지")
+        
         self.page_label = QLabel("1 페이지")
         self.page_label.setAlignment(Qt.AlignCenter)
+        self.page_label.setStyleSheet("""
+            QLabel {
+                font-weight: 600;
+                color: #495057;
+                background: transparent;
+                border: none;
+            }
+        """)
+        
         self.next_button = QPushButton(qta.icon('fa5s.chevron-right', color='#495057'), "")
         self.next_button.setObjectName("PagingButton")
+        self.next_button.setToolTip("다음 페이지")
 
         paging_layout.addWidget(self.prev_button)
         paging_layout.addWidget(self.page_label)
         paging_layout.addWidget(self.next_button)
-        right_layout.addLayout(paging_layout)
-
-        # --- 4. 상태 바 ---
-        self.statusBar = QStatusBar()
-        right_layout.addWidget(self.statusBar)
+        right_layout.addWidget(paging_container)
 
         # ===================================================================
         # 스플리터 및 메인 레이아웃에 위젯 배치
         # ===================================================================
         splitter.addWidget(left_panel)
         splitter.addWidget(right_panel)
-        splitter.setSizes([180, 620]) # 초기 분할 크기 설정
+        splitter.setSizes([200, 600]) # 초기 분할 크기 설정 (왼쪽 패널을 약간 넓게)
         main_layout.addWidget(splitter)
 
         # ===================================================================
@@ -782,12 +1078,14 @@ class MemoListWindow(QWidget):
         favorites_item.setText(0, f"즐겨찾기 ({favorites_count})")
         favorites_item.setIcon(0, qta.icon('fa5s.star', color='#f0c420'))
         favorites_item.setData(0, Qt.UserRole, "favorites")
+        favorites_item.setFont(0, QFont("Segoe UI", 10, QFont.Bold))
 
         # 전체 메모 카운트
         all_memos_count = len(local_cache)
         all_memos_item = QTreeWidgetItem(self.nav_tree)
         all_memos_item.setText(0, f"전체 메모 ({all_memos_count})")
-        all_memos_item.setIcon(0, qta.icon('fa5s.inbox'))
+        all_memos_item.setIcon(0, qta.icon('fa5s.inbox', color='#495057'))
+        all_memos_item.setFont(0, QFont("Segoe UI", 10, QFont.Bold))
 
         # --- 구분선 아이템 추가 ---
         separator = QTreeWidgetItem(self.nav_tree)
@@ -797,7 +1095,8 @@ class MemoListWindow(QWidget):
         if all_tags:
             tags_root_item = QTreeWidgetItem(self.nav_tree)
             tags_root_item.setText(0, f"태그 ({len(all_tags)})")
-            tags_root_item.setIcon(0, qta.icon('fa5s.tags'))
+            tags_root_item.setIcon(0, qta.icon('fa5s.tags', color='#495057'))
+            tags_root_item.setFont(0, QFont("Segoe UI", 10, QFont.Bold))
             
             # 각 태그의 문서 수 계산
             tag_counts = {}
@@ -811,16 +1110,18 @@ class MemoListWindow(QWidget):
                 count = tag_counts.get(tag, 0)
                 tag_item = QTreeWidgetItem(tags_root_item)
                 tag_item.setText(0, f"{tag} ({count})")
+                tag_item.setFont(0, QFont("Segoe UI", 9))
+                # 하위 태그 아이콘 제거 (아이콘 설정하지 않음)
             tags_root_item.setExpanded(True)
             
         # 기본 선택은 하지 않음 (show_memo_list_window에서 처리)
         self.nav_tree.blockSignals(False)
 
     def populate_table(self, data, is_local, series_cache=None):
-        is_api_result = not is_local
-        self.prev_button.setVisible(is_api_result)
-        self.next_button.setVisible(is_api_result)
-        self.page_label.setVisible(is_api_result)
+        # 페이징 버튼은 항상 표시 (로컬 캐시와 API 검색 모두 지원)
+        self.prev_button.setVisible(True)
+        self.next_button.setVisible(True)
+        self.page_label.setVisible(True)
         
         self.table.clear()
         
@@ -856,17 +1157,24 @@ class MemoListWindow(QWidget):
             # MOC 아이템 생성
             moc_item = QTreeWidgetItem()
             moc_item.setText(1, f"📚 {title}")  # MOC 아이콘 추가
-            moc_item.setText(2, date)
-            moc_item.setText(3, tags)
+            moc_item.setText(2, tags)  # 태그 (2번 컬럼)
+            moc_item.setText(3, date)  # 날짜 (3번 컬럼)
             moc_item.setData(0, Qt.UserRole, doc_id)
             moc_item.setData(1, Qt.UserRole, doc_id)
             moc_item.setData(2, Qt.UserRole, doc_id)
             moc_item.setData(3, Qt.UserRole, doc_id)
             
+            # 컬럼 정렬 설정
+            moc_item.setTextAlignment(2, Qt.AlignRight | Qt.AlignVCenter)  # 태그 오른쪽 정렬
+            moc_item.setTextAlignment(3, Qt.AlignRight | Qt.AlignVCenter)  # 날짜 오른쪽 정렬
+            
             # 즐겨찾기 아이콘 설정
             is_favorite = doc_id in favorites
-            icon = qta.icon('fa5s.star', color='#f0c420') if is_favorite else qta.icon('fa5s.star', color='#aaa')
+            icon = qta.icon('fa5s.star', color='#f0c420') if is_favorite else qta.icon('fa5s.star', color='#ced4da')
             moc_item.setIcon(0, icon)
+            
+            # MOC 아이템 스타일 설정
+            moc_item.setFont(1, QFont("Segoe UI", 10, QFont.Bold))  # 제목을 굵게
             
             # MOC 아이템을 트리에 추가
             self.table.addTopLevelItem(moc_item)
@@ -889,17 +1197,24 @@ class MemoListWindow(QWidget):
                         # 회차 아이템 생성
                         chapter_item = QTreeWidgetItem()
                         chapter_item.setText(1, f"  📄 {chapter_title}")  # 회차 아이콘과 들여쓰기
-                        chapter_item.setText(2, chapter_date)
-                        chapter_item.setText(3, chapter_tags)
+                        chapter_item.setText(2, chapter_tags)  # 태그 (2번 컬럼)
+                        chapter_item.setText(3, chapter_date)  # 날짜 (3번 컬럼)
                         chapter_item.setData(0, Qt.UserRole, chapter_doc_id)
                         chapter_item.setData(1, Qt.UserRole, chapter_doc_id)
                         chapter_item.setData(2, Qt.UserRole, chapter_doc_id)
                         chapter_item.setData(3, Qt.UserRole, chapter_doc_id)
                         
+                        # 컬럼 정렬 설정
+                        chapter_item.setTextAlignment(2, Qt.AlignRight | Qt.AlignVCenter)  # 태그 오른쪽 정렬
+                        chapter_item.setTextAlignment(3, Qt.AlignRight | Qt.AlignVCenter)  # 날짜 오른쪽 정렬
+                        
                         # 회차 즐겨찾기 아이콘
                         is_chapter_favorite = chapter_doc_id in favorites
-                        chapter_icon = qta.icon('fa5s.star', color='#f0c420') if is_chapter_favorite else qta.icon('fa5s.star', color='#aaa')
+                        chapter_icon = qta.icon('fa5s.star', color='#f0c420') if is_chapter_favorite else qta.icon('fa5s.star', color='#ced4da')
                         chapter_item.setIcon(0, chapter_icon)
+                        
+                        # 회차 아이템 스타일 설정
+                        chapter_item.setFont(1, QFont("Segoe UI", 9))  # 회차는 일반 폰트
                         
                         moc_item.addChild(chapter_item)
         
@@ -919,28 +1234,103 @@ class MemoListWindow(QWidget):
                 # 일반 문서 아이템 생성
                 doc_item = QTreeWidgetItem()
                 doc_item.setText(1, f"📄 {title}")
-                doc_item.setText(2, date)
-                doc_item.setText(3, tags)
+                doc_item.setText(2, tags)  # 태그 (2번 컬럼)
+                doc_item.setText(3, date)  # 날짜 (3번 컬럼)
                 doc_item.setData(0, Qt.UserRole, doc_id)
                 doc_item.setData(1, Qt.UserRole, doc_id)
                 doc_item.setData(2, Qt.UserRole, doc_id)
                 doc_item.setData(3, Qt.UserRole, doc_id)
                 
+                # 컬럼 정렬 설정
+                doc_item.setTextAlignment(2, Qt.AlignRight | Qt.AlignVCenter)  # 태그 오른쪽 정렬
+                doc_item.setTextAlignment(3, Qt.AlignRight | Qt.AlignVCenter)  # 날짜 오른쪽 정렬
+                
                 # 즐겨찾기 아이콘
                 is_favorite = doc_id in favorites
-                icon = qta.icon('fa5s.star', color='#f0c420') if is_favorite else qta.icon('fa5s.star', color='#aaa')
+                icon = qta.icon('fa5s.star', color='#f0c420') if is_favorite else qta.icon('fa5s.star', color='#ced4da')
                 doc_item.setIcon(0, icon)
+                
+                # 일반 문서 아이템 스타일 설정
+                doc_item.setFont(1, QFont("Segoe UI", 10))  # 일반 폰트
                 
                 self.table.addTopLevelItem(doc_item)
     
     def update_paging_buttons(self, prev_enabled, next_enabled, page_num):
         self.prev_button.setEnabled(prev_enabled); self.next_button.setEnabled(next_enabled); self.page_label.setText(f"{page_num} 페이지")
     
+    def show_status_message(self, message, message_type="info"):
+        """상태 표시바에 메시지를 표시합니다.
+        
+        Args:
+            message (str): 표시할 메시지
+            message_type (str): 메시지 타입 ("info", "success", "warning", "error")
+        """
+        # 메시지 타입에 따른 아이콘과 색상 설정
+        if message_type == "success":
+            icon = qta.icon('fa5s.check-circle', color='#28a745')
+            color = "#28a745"
+        elif message_type == "warning":
+            icon = qta.icon('fa5s.exclamation-triangle', color='#ffc107')
+            color = "#ffc107"
+        elif message_type == "error":
+            icon = qta.icon('fa5s.times-circle', color='#dc3545')
+            color = "#dc3545"
+        else:  # info
+            icon = qta.icon('fa5s.info-circle', color='#17a2b8')
+            color = "#17a2b8"
+        
+        # 상태 표시바에 아이콘과 메시지 표시
+        self.statusBar.showMessage(f"  {message}")
+        
+        # 아이콘을 상태 표시바에 추가 (임시로 텍스트로 표시)
+        self.statusBar.setStyleSheet(f"""
+            QStatusBar {{
+                background-color: #f8f9fa;
+                border: 1px solid #e9ecef;
+                border-radius: 6px;
+                color: {color};
+                font-size: 9pt;
+                padding: 8px 12px;
+                margin: 4px 0px;
+                min-height: 24px;
+                max-height: 24px;
+                font-weight: 500;
+            }}
+        """)
+        
+        # 3초 후 기본 스타일로 복원
+        QTimer.singleShot(3000, self.reset_status_style)
+    
+    def reset_status_style(self):
+        """상태 표시바 스타일을 기본으로 복원합니다."""
+        self.statusBar.setStyleSheet("""
+            QStatusBar {
+                background-color: #f8f9fa;
+                border: 1px solid #e9ecef;
+                border-radius: 6px;
+                color: #6c757d;
+                font-size: 9pt;
+                padding: 8px 12px;
+                margin: 4px 0px;
+                min-height: 24px;
+                max-height: 24px;
+            }
+        """)
+    
     def on_item_clicked(self, item, column):
         if column == 0: # 0번 열(즐겨찾기 아이콘)이 클릭되었을 때
             doc_id = item.data(0, Qt.UserRole)
             if doc_id:
                 self.favorite_toggled_from_list.emit(doc_id)
+        else:
+            # 다른 열 클릭 시 - 시리즈 문서인지 확인
+            doc_id = item.data(0, Qt.UserRole)
+            if doc_id:
+                # MOC 문서인지 확인 (📚 아이콘이 있으면 MOC)
+                title_text = item.text(1)
+                if "📚" in title_text and item.childCount() > 0:
+                    # MOC 문서이고 하위 아이템이 있으면 펼치기/접기
+                    item.setExpanded(not item.isExpanded())
     
     def on_item_double_clicked(self, item, column):
         # 더블클릭 시 해당 문서 열기

@@ -30,7 +30,7 @@ def load_config():
             'spreadsheet_id': 'YOUR_SPREADSHEET_ID', # 기본값은 비워두거나 예시 ID 사용
             'folder_id': 'YOUR_FOLDER_ID'
         },
-        'Display': {'page_size': '30','custom_css_path': '', 'autosave_interval_ms': '3000'},
+        'Display': {'page_size': '30', 'local_page_size': '20', 'custom_css_path': '', 'autosave_interval_ms': '3000'},
         'WindowStates': {}
     }
     
