@@ -403,6 +403,7 @@ class AppController:
         # id가 favorites이면 즐겨찾기 목록을 표시
         if selected_item_id == "favorites":
             fav_memos = [row for row in self.local_cache if len(row) > 2 and row[2] in self.favorites]
+            # 즐겨찾기에서도 시리즈 문서의 회차들을 포함하여 표시
             self._display_paginated_data(fav_memos)
             return
 
@@ -498,10 +499,12 @@ class AppController:
                 # 네비게이션 선택 이벤트는 자동으로 발생
         else:
             # 이전 선택이 없으면 기본값으로 '전체 메모' 선택
+            print("DEBUG: 처음 열기 - 전체 메모 표시")
             all_memos_item = self.memo_list.nav_tree.findItems("전체 메모", Qt.MatchFixedString | Qt.MatchRecursive, 0)
             if all_memos_item:
                 self.memo_list.nav_tree.setCurrentItem(all_memos_item[0])
-            # 네비게이션 선택 이벤트는 자동으로 발생
+                # 네비게이션 선택 이벤트를 명시적으로 호출
+                self.on_navigation_selected("전체 메모")
 
 
     def on_search_text_changed(self):
@@ -1391,6 +1394,7 @@ class AppController:
 
         cache_path = os.path.join(config_manager.CONTENT_CACHE_DIR, f"{doc_id}.html")
         
+        # 캐시가 있으면 사용하고, 없으면 원본에서 로드
         if os.path.exists(cache_path):
             try:
                 with open(cache_path, 'r', encoding='utf-8') as f:
@@ -1403,8 +1407,9 @@ class AppController:
                 error_html = self._get_final_html("오류", f"<body><p>캐시 파일을 읽는 중 오류가 발생했습니다: {e}</p></body>", "")
                 self.emitter.show_rich_view.emit(doc_id, "오류", error_html, view_mode_info)
         else:
-            error_html = self._get_final_html("오프라인", "<body><p>이 문서에 대한 로컬 캐시가 없습니다. 목록에서 문서를 열어 동기화해주세요.</p></body>", "")
-            self.emitter.show_rich_view.emit(doc_id, "오프라인", error_html, view_mode_info)
+            # 캐시가 없는 경우 원본에서 로드
+            print(f"DEBUG: 캐시가 없어서 원본에서 로드: {doc_id}")
+            self.view_memo_by_id(doc_id, force_refresh=True)
 
     def edit_tags_from_viewer(self):
         if not self.current_viewing_doc_id:
@@ -1999,8 +2004,11 @@ class AppController:
             # 현재 선택된 네비게이션 아이템 확인
             current_item = self.memo_list.nav_tree.currentItem()
             if not current_item:
-                # 기본적으로 전체 메모 표시
+                # 기본적으로 전체 메모 표시하고 "전체 메모" 아이템을 선택
                 print("DEBUG: 현재 선택된 아이템이 없음, 전체 메모 표시")
+                all_memos_item = self.memo_list.nav_tree.findItems("전체 메모", Qt.MatchFixedString | Qt.MatchRecursive, 0)
+                if all_memos_item:
+                    self.memo_list.nav_tree.setCurrentItem(all_memos_item[0])
                 self._display_paginated_data(self.local_cache)
                 return
             
@@ -2035,25 +2043,54 @@ class AppController:
             traceback.print_exc()
     
     def _display_paginated_data(self, data):
-        """데이터를 페이지 단위로 나누어서 표시"""
+        """데이터를 페이지 단위로 나누어서 표시 (MOC와 회차 그룹화, 회차는 페이징 제외)"""
         try:
-            # 전체 페이지 수 계산
-            self.total_local_pages = max(1, (len(data) + self.local_page_size - 1) // self.local_page_size)
+            # MOC 문서와 회차들을 그룹화
+            grouped_data = self._group_moc_and_chapters(data)
+            
+            # 페이징을 위한 메인 문서들만 필터링 (회차 제외)
+            main_docs = []
+            for row in grouped_data:
+                # 회차 마커가 없는 문서만 페이징에 포함
+                if len(row) < 5 or row[4] != '_chapter_':
+                    main_docs.append(row)
+            
+            # 전체 페이지 수 계산 (메인 문서만)
+            self.total_local_pages = max(1, (len(main_docs) + self.local_page_size - 1) // self.local_page_size)
             
             # 현재 페이지가 전체 페이지를 초과하지 않도록 조정
             if self.current_local_page > self.total_local_pages:
                 self.current_local_page = self.total_local_pages
             
-            # 현재 페이지에 해당하는 데이터 추출
+            # 현재 페이지에 해당하는 메인 문서들 추출
             start_idx = (self.current_local_page - 1) * self.local_page_size
             end_idx = start_idx + self.local_page_size
-            page_data = data[start_idx:end_idx]
+            page_main_docs = main_docs[start_idx:end_idx]
             
-            print(f"DEBUG: 페이징 - 전체 {len(data)}개, 페이지 {self.current_local_page}/{self.total_local_pages}, 표시 {len(page_data)}개")
+            # 현재 페이지의 메인 문서들과 그 회차들을 포함한 최종 데이터 구성
+            final_page_data = []
+            for main_doc in page_main_docs:
+                final_page_data.append(main_doc)
+                
+                # 이 메인 문서가 MOC인 경우, 해당 회차들도 추가
+                if len(main_doc) > 3 and main_doc[3] and '#moc' in main_doc[3].lower():
+                    moc_id = main_doc[2] if len(main_doc) > 2 else ""
+                    if hasattr(self, 'series_cache'):
+                        for chapter_id, chapter_info in self.series_cache.items():
+                            if chapter_info.get('parent_moc_id') == moc_id:
+                                # 회차 문서를 grouped_data에서 찾기
+                                for row in grouped_data:
+                                    if len(row) > 2 and row[2] == chapter_id and len(row) > 4 and row[4] == '_chapter_':
+                                        # 회차 마커 제거하고 추가
+                                        chapter_row = row[:-1]  # 마지막 요소(_chapter_) 제거
+                                        final_page_data.append(chapter_row)
+                                        break
+            
+            print(f"DEBUG: 페이징 - 메인 문서 {len(main_docs)}개, 페이지 {self.current_local_page}/{self.total_local_pages}, 표시 {len(final_page_data)}개")
             
             # 시리즈 캐시와 함께 데이터 전송
             series_cache = self.series_cache if hasattr(self, 'series_cache') else {}
-            self.emitter.list_data_loaded.emit(page_data, True, series_cache)
+            self.emitter.list_data_loaded.emit(final_page_data, True, series_cache)
             
             # 페이징 버튼 상태 업데이트
             prev_enabled = self.current_local_page > 1
@@ -2064,6 +2101,68 @@ class AppController:
             print(f"DEBUG: _display_paginated_data 오류: {e}")
             import traceback
             traceback.print_exc()
+    
+    def _group_moc_and_chapters(self, data):
+        """MOC 문서와 그 회차들을 그룹화하여 페이징 시 MOC만 카운트되도록 함"""
+        try:
+            # MOC 문서와 일반 문서를 분리
+            moc_docs = []
+            regular_docs = []
+            chapter_docs = set()  # 회차 문서 ID들을 추적
+            
+            for row in data:
+                if len(row) > 3 and row[3] and '#moc' in row[3].lower():
+                    moc_docs.append(row)
+                else:
+                    regular_docs.append(row)
+            
+            # 시리즈 캐시에서 회차 문서들 확인
+            if hasattr(self, 'series_cache'):
+                for chapter_id in self.series_cache.keys():
+                    chapter_docs.add(chapter_id)
+            
+            # MOC 문서들을 먼저 추가하고, 각 MOC의 회차들을 찾아서 함께 그룹화
+            grouped_data = []
+            
+            for moc_row in moc_docs:
+                moc_id = moc_row[2] if len(moc_row) > 2 else ""
+                grouped_data.append(moc_row)
+                
+                # 이 MOC의 회차들을 찾아서 추가 (페이징 카운트에는 포함되지 않음)
+                if hasattr(self, 'series_cache'):
+                    for chapter_id, chapter_info in self.series_cache.items():
+                        if chapter_info.get('parent_moc_id') == moc_id:
+                            # 회차 문서를 regular_docs에서 찾기
+                            chapter_found = False
+                            for reg_row in regular_docs:
+                                if len(reg_row) > 2 and reg_row[2] == chapter_id:
+                                    # 회차 문서는 별도 표시를 위해 특별한 마커 추가
+                                    reg_row_with_marker = reg_row + ['_chapter_']  # 회차 마커 추가
+                                    grouped_data.append(reg_row_with_marker)
+                                    chapter_found = True
+                                    break
+                            
+                            # regular_docs에서 찾지 못한 경우, 전체 local_cache에서 찾기
+                            if not chapter_found:
+                                for cache_row in self.local_cache:
+                                    if len(cache_row) > 2 and cache_row[2] == chapter_id:
+                                        # 회차 문서는 별도 표시를 위해 특별한 마커 추가
+                                        cache_row_with_marker = cache_row + ['_chapter_']  # 회차 마커 추가
+                                        grouped_data.append(cache_row_with_marker)
+                                        break
+            
+            # 시리즈에 속하지 않은 일반 문서들 추가
+            for reg_row in regular_docs:
+                reg_id = reg_row[2] if len(reg_row) > 2 else ""
+                if reg_id not in chapter_docs:
+                    grouped_data.append(reg_row)
+            
+            print(f"DEBUG: 그룹화 완료 - MOC: {len(moc_docs)}개, 회차: {len(chapter_docs)}개, 일반: {len(regular_docs) - len(chapter_docs)}개")
+            return grouped_data
+            
+        except Exception as e:
+            print(f"DEBUG: _group_moc_and_chapters 오류: {e}")
+            return data
 
     def update_series_cache_immediately(self, moc_doc_id, new_chapter_id, new_chapter_title):
         """새 회차 추가 시 시리즈 캐시를 즉시 업데이트"""

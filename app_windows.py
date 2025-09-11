@@ -1072,6 +1072,13 @@ class MemoListWindow(QWidget):
         self.nav_tree.blockSignals(True)
         self.nav_tree.clear()
 
+        # 전체 메모 카운트 (첫 번째로 배치)
+        all_memos_count = len(local_cache)
+        all_memos_item = QTreeWidgetItem(self.nav_tree)
+        all_memos_item.setText(0, f"전체 메모 ({all_memos_count})")
+        all_memos_item.setIcon(0, qta.icon('fa5s.inbox', color='#495057'))
+        all_memos_item.setFont(0, QFont("Segoe UI", 10, QFont.Bold))
+
         # 즐겨찾기 카운트
         favorites_count = len(config_manager.get_favorites())
         favorites_item = QTreeWidgetItem(self.nav_tree)
@@ -1079,13 +1086,6 @@ class MemoListWindow(QWidget):
         favorites_item.setIcon(0, qta.icon('fa5s.star', color='#f0c420'))
         favorites_item.setData(0, Qt.UserRole, "favorites")
         favorites_item.setFont(0, QFont("Segoe UI", 10, QFont.Bold))
-
-        # 전체 메모 카운트
-        all_memos_count = len(local_cache)
-        all_memos_item = QTreeWidgetItem(self.nav_tree)
-        all_memos_item.setText(0, f"전체 메모 ({all_memos_count})")
-        all_memos_item.setIcon(0, qta.icon('fa5s.inbox', color='#495057'))
-        all_memos_item.setFont(0, QFont("Segoe UI", 10, QFont.Bold))
 
         # --- 구분선 아이템 추가 ---
         separator = QTreeWidgetItem(self.nav_tree)
