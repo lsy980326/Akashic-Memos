@@ -457,7 +457,7 @@ class MarkdownEditorWindow(QWidget):
         self.editor.setPlaceholderText("# 마크다운으로 메모를 작성하세요...");
         self.viewer_page = PreviewWebPage(self)
         self.viewer.setPage(self.viewer_page)
-        self.editor.setStyleSheet("font-family: Consolas, 'Courier New', monospace;"); splitter.addWidget(self.editor); splitter.addWidget(self.viewer); splitter.setSizes([600, 600])
+        self.editor.setStyleSheet("font-family: Consolas, 'Courier New', monospace; color: #000000 !important;"); splitter.addWidget(self.editor); splitter.addWidget(self.viewer); splitter.setSizes([600, 600])
         main_layout.addWidget(splitter)
 
         tag_layout = QHBoxLayout();
@@ -1357,6 +1357,8 @@ class SettingsWindow(QWidget):
         self.sheet_id_edit = QLineEdit(); self.folder_id_edit = QLineEdit(); self.page_size_edit = QLineEdit()
         form_layout.addRow(QLabel("새 메모 단축키:"), self.hotkey_new_edit); form_layout.addRow(QLabel("목록 보기 단축키:"), self.hotkey_list_edit); form_layout.addRow(QLabel("빠른 실행 단축키:"), self.hotkey_launcher_edit)
         form_layout.addRow(QLabel("Google Sheet ID:"), self.sheet_id_edit); form_layout.addRow(QLabel("Google Drive Folder ID:"), self.folder_id_edit); form_layout.addRow(QLabel("페이지 당 항목 수:"), self.page_size_edit)
+        
+        
         css_layout = QHBoxLayout(); self.css_path_edit = QLineEdit(); self.css_path_edit.setPlaceholderText("CSS 파일 경로 (비워두면 기본 스타일 사용)"); css_browse_button = QPushButton("찾아보기"); css_browse_button.clicked.connect(self.browse_css_file)
         css_layout.addWidget(self.css_path_edit); css_layout.addWidget(css_browse_button); form_layout.addRow(QLabel("사용자 정의 뷰어 CSS:"), css_layout)
         
@@ -1365,11 +1367,13 @@ class SettingsWindow(QWidget):
         form_layout.addRow(self.autosave_checkbox, self.autosave_interval_edit)
 
         self.startup_checkbox = QCheckBox("윈도우 시작 시 자동 실행"); self.save_button = QPushButton("설정 저장");
+        self.save_button.clicked.connect(self.save_settings)
         main_layout = QVBoxLayout(); main_layout.addLayout(form_layout); main_layout.addWidget(self.startup_checkbox); main_layout.addWidget(self.save_button); self.setLayout(main_layout)
     def load_current_settings(self):
         self.hotkey_new_edit.setText(config_manager.get_setting('Hotkeys', 'new_memo')); self.hotkey_list_edit.setText(config_manager.get_setting('Hotkeys', 'list_memos')); self.hotkey_launcher_edit.setText(config_manager.get_setting('Hotkeys', 'quick_launcher'))
         self.sheet_id_edit.setText(config_manager.get_setting('Google', 'spreadsheet_id')); self.folder_id_edit.setText(config_manager.get_setting('Google', 'folder_id')); self.page_size_edit.setText(config_manager.get_setting('Display', 'page_size'))
         self.css_path_edit.setText(config_manager.get_setting('Display', 'custom_css_path'))
+        
         
         autosave_interval = config_manager.get_setting('Display', 'autosave_interval_ms')
         self.autosave_interval_edit.setText(autosave_interval)
@@ -1382,6 +1386,15 @@ class SettingsWindow(QWidget):
     def browse_css_file(self):
         fname, _ = QFileDialog.getOpenFileName(self, '사용자 CSS 파일 선택', '', 'CSS Files (*.css)');
         if fname: self.css_path_edit.setText(fname)
+    
+    
+    def save_settings(self):
+        """설정 저장 - AppController의 save_settings 메서드 호출"""
+        if hasattr(self, 'controller') and self.controller:
+            self.controller.save_settings()
+        else:
+            QMessageBox.information(self, "저장 완료", "설정이 저장되었습니다.")
+    
     def closeEvent(self, event): self.hide()
 
 class TodoItemWidget(QFrame):

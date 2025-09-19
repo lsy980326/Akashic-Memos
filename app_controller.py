@@ -72,6 +72,8 @@ class AppController:
         self.memo_list.setWindowIcon(app_icon)
         self.settings = SettingsWindow()
         self.settings.setWindowIcon(app_icon)
+        # 설정 창에 AppController 참조 저장
+        self.settings.controller = self
         self.rich_viewer = RichMemoViewWindow()
         self.rich_viewer.setWindowIcon(app_icon)
         self.quick_launcher = QuickLauncherWindow()
@@ -1234,7 +1236,11 @@ class AppController:
 
     def save_settings(self):
         s = self.settings
-        config_manager.save_settings(s.hotkey_new_edit.text(), s.hotkey_list_edit.text(), s.hotkey_launcher_edit.text(), s.sheet_id_edit.text(), s.folder_id_edit.text(), s.page_size_edit.text(), s.css_path_edit.text())
+        autosave_enabled, autosave_interval = s.get_autosave_settings()
+        autosave_interval = autosave_interval if autosave_enabled else "0"
+        
+        
+        config_manager.save_settings(s.hotkey_new_edit.text(), s.hotkey_list_edit.text(), s.hotkey_launcher_edit.text(), s.sheet_id_edit.text(), s.folder_id_edit.text(), s.page_size_edit.text(), s.css_path_edit.text(), autosave_interval)
         QMessageBox.information(s, "저장 완료", "설정이 저장되었습니다.\n일부 설정은 프로그램을 다시 시작해야 적용됩니다.")
         # 핫키 재설정
         keyboard.unhook_all()

@@ -16,6 +16,7 @@ def get_services():
     drive_service = build('drive', 'v3', credentials=creds)
     return docs_service, sheets_service, drive_service
 
+
 IMAGE_FOLDER_NAME = "Akashic Records Images"
 IMAGE_FOLDER_ID = None
 
@@ -120,9 +121,23 @@ def save_memo(title, markdown_content, tags_text):
             spreadsheetId=SPREADSHEET_ID, range='A1', valueInputOption='USER_ENTERED',
             insertDataOption='INSERT_ROWS', body={'values': [row_data]}).execute()
         return True, doc_id
+    except HttpError as e:
+        if e.resp.status == 403:
+            print(f"권한 오류 발생: {e}")
+            print("해결 방법:")
+            print("1. Google Cloud Console에서 다음 API가 활성화되었는지 확인:")
+            print("   - Google Docs API")
+            print("   - Google Sheets API") 
+            print("   - Google Drive API")
+            print("2. Service Account가 Google Drive 폴더와 Sheets에 공유되었는지 확인")
+            print("3. Service Account 권한이 '편집자'로 설정되었는지 확인")
+            return False, f"권한 오류: {e.details if hasattr(e, 'details') else str(e)}"
+        else:
+            print(f"HTTP 오류 발생: {e}")
+            return False, f"HTTP 오류: {e.details if hasattr(e, 'details') else str(e)}"
     except Exception as e:
         print(f"메모 저장 중 오류 발생: {e}")
-        return False, None
+        return False, f"알 수 없는 오류: {str(e)}"
 
 def update_memo(doc_id, new_title, markdown_content, tags_text):
     docs_service, sheets_service, drive_service = get_services()
